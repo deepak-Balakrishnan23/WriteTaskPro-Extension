@@ -896,6 +896,103 @@ function summarizePage(content) {
   return [intro, ...bullets].join('\n');
 }
 
+function normalizeSummaryLines(content) {
+  const seen = new Set();
+  return String(content || '')
+    .split(/\n+/)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean)
+    .filter((line) => line.length >= 25)
+    .filter((line) => !/^(advertisement|sponsored|share|copy link|sign in|log in|subscribe|follow us)$/i.test(line))
+    .filter((line) => {
+      const normalized = line.toLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+}
+
+function isLikelyHeading(line) {
+  if (!line) return false;
+  if (line.length > 80) return false;
+  if (/[.!?]$/.test(line)) return false;
+  const words = line.split(/\s+/).filter(Boolean);
+  if (words.length < 1 || words.length > 8) return false;
+  return /^(?:[A-Z][\w&/-]*\s*)+$/.test(line) || /^[A-Z][A-Za-z\s&/-]+$/.test(line);
+}
+
+function scoreSummarySentence(sentence, index, titleWords) {
+  const lower = sentence.toLowerCase();
+  const words = lower.match(/\b[a-z]{3,}\b/g) || [];
+  const uniqueWords = new Set(words);
+  let score = uniqueWords.size;
+
+  if (index < 3) score += 4;
+  if (sentence.length >= 55 && sentence.length <= 180) score += 3;
+  if (/\b(injury|availability|tactics|matchups|probable|record|confirmed|return|coach|captain|season|form)\b/i.test(sentence)) score += 3;
+
+  if (titleWords?.size) {
+    const overlap = [...uniqueWords].filter((word) => titleWords.has(word)).length;
+    score += overlap * 2;
+  }
+
+  if (/[:|]/.test(sentence)) score += 2;
+  if (sentence.length > 220) score -= 3;
+  return score;
+}
+
+function buildBriefSummary(content) {
+  const lines = normalizeSummaryLines(content);
+  if (!lines.length) return 'No readable content found.';
+
+  const title = lines.find(isLikelyHeading) || '';
+  const bodyLines = title ? lines.filter((line, index) => index !== lines.indexOf(title)) : lines;
+  const text = bodyLines.join(' ');
+
+  const sentences = splitSentences(text)
+    .map((sentence) => cleanupSpacing(sentence))
+    .filter((sentence) => sentence.split(' ').length >= 7)
+    .filter((sentence) => sentence.length <= 240);
+
+  if (!sentences.length) {
+    return truncateSummarySentence(text, 180);
+  }
+
+  const titleWords = new Set(
+    (title.toLowerCase().match(/\b[a-z]{3,}\b/g) || []).filter((word) => !['the', 'and', 'for'].includes(word))
+  );
+
+  const ranked = sentences
+    .map((sentence, index) => ({
+      sentence,
+      index,
+      score: scoreSummarySentence(sentence, index, titleWords)
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, 3)
+    .sort((a, b) => a.index - b.index);
+
+  const parts = ranked
+    .map((item) => truncateSummarySentence(compressSummarySentence(item.sentence), 110))
+    .filter(Boolean);
+
+  if (!parts.length) {
+    return truncateSummarySentence(text, 180);
+  }
+
+  const shortTitle = title ? truncateSummarySentence(title, 55) : '';
+  const introCore = parts[0].replace(/[.!?]+$/, '');
+  const intro = shortTitle
+    ? `${shortTitle}: ${introCore}.`
+    : `In short: ${introCore}.`;
+  const bullets = parts
+    .slice(1, 3)
+    .map((part) => part.replace(/^[•\-\s]+/, ''))
+    .map((part) => `• ${part}`);
+
+  return [intro, ...bullets].join('\n');
+}
+
 function getWritingScore(text) {
   const source = text || '';
   const words = source.match(/\b[\w']+\b/g) || [];
@@ -1270,7 +1367,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case 'analyzeHumanizeText':
           return analyzeAndHumanizeText(request.text);
         case 'summarize':
-          return summarizePage(request.content);
+          return buildBriefSummary(request.content);
         case 'writingScore':
           return getWritingScore(request.text);
         case 'parseTask':

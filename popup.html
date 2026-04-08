@@ -32,15 +32,18 @@
     .btn-primary { background: var(--accent); color: #fff; width: 100%; }
     .btn-primary:hover { background: var(--accent-h); }
 
-    .task-mini { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+    .task-ready-banner { display: none; margin: 0 16px 4px; padding: 10px 12px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 12%, var(--bg2)); border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border)); color: var(--accent); font-size: 12px; font-weight: 700; }
+    .task-ready-banner.show { display: block; }
+    .task-mini { display: flex; align-items: center; gap: 10px; padding: 12px 0; line-height: 1.45; }
     .task-mini + .task-mini { border-top: 1px solid var(--border); }
     .task-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
     .task-dot.P1 { background: var(--danger); } .task-dot.P2 { background: var(--warning); }
     .task-dot.P3 { background: var(--accent); } .task-dot.P4 { background: #6b7280; }
-    .task-dot.ready { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent); }
-    .task-mini-title { flex: 1; font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .task-mini-time { font-size: 10px; color: var(--text3); white-space: nowrap; }
-    .task-mini.ready .task-mini-time { color: var(--accent); font-weight: 700; }
+    .task-dot.ready { background: var(--accent); box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 16%, transparent); }
+    .task-mini.ready { background: color-mix(in srgb, var(--accent) 6%, transparent); border-radius: 12px; padding-left: 8px; padding-right: 8px; margin: 2px 0; }
+    .task-mini-title { flex: 1; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+    .task-mini-time { font-size: 11px; color: var(--text3); white-space: nowrap; font-weight: 600; }
+    .task-mini.ready .task-mini-time { color: var(--accent); font-weight: 800; }
     .empty-text { font-size: 12px; color: var(--text3); text-align: center; padding: 8px 0; }
 
     .helper-card { display: flex; flex-direction: column; gap: 6px; padding: 12px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; }
@@ -57,6 +60,7 @@
   </div>
 
   <div id="main-area">
+    <div id="popup-ready-banner" class="task-ready-banner"></div>
     <div class="section"><div class="section-title">Today's Tasks</div><div id="popup-tasks"></div></div>
     <div class="section">
       <div class="helper-card">

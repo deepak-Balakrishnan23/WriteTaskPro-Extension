@@ -89,6 +89,19 @@
     document.body.appendChild(floatingBtn);
   }
 
+  async function refreshReminderIndicator() {
+    if (!floatingBtn) return;
+    try {
+      const tasks = await sendRuntimeMessage({ action: 'getTasks' });
+      const readyCount = (tasks || []).filter((task) => !task.completed && task.attentionNeeded).length;
+      floatingBtn.classList.toggle('wtp-has-alert', readyCount > 0);
+      floatingBtn.dataset.reminderCount = readyCount > 0 ? String(Math.min(readyCount, 9)) : '';
+    } catch {
+      floatingBtn.classList.remove('wtp-has-alert');
+      floatingBtn.dataset.reminderCount = '';
+    }
+  }
+
   // ── Sidebar (iframe) ──
   function createSidebar() {
     const sidebarUrl = getRuntimeUrl('sidebar.html');
@@ -147,8 +160,7 @@
         replaceSelectedText(data.text);
         break;
       case 'getPageContent':
-        // BUG-10 FIX: Truncate to 8000 chars BEFORE postMessage to avoid main-thread freeze
-        const content = (document.body.innerText || '').substring(0, 8000);
+        const content = (document.body.innerText || '').trim();
         sendToSidebar({ source: 'wtp-content', action: 'pageContent', content });
         break;
     }
@@ -252,10 +264,13 @@
     if (!selectionToolbar) return;
     selectionToolbar.style.display = 'flex';
     const rect = selectionToolbar.getBoundingClientRect();
-    const left = Math.min(x, window.innerWidth - rect.width - 10);
-    const top = Math.max(y - 50, 10);
-    selectionToolbar.style.left = left + 'px';
-    selectionToolbar.style.top = top + 'px';
+    const maxLeft = window.scrollX + window.innerWidth - rect.width - 10;
+    const left = Math.max(window.scrollX + 10, Math.min(x, maxLeft));
+    const preferredTop = y + 12;
+    const maxTop = window.scrollY + window.innerHeight - rect.height - 10;
+    const top = Math.max(window.scrollY + 10, Math.min(preferredTop, maxTop));
+    selectionToolbar.style.left = `${left}px`;
+    selectionToolbar.style.top = `${top}px`;
   }
 
   function hideSelectionToolbar() {
@@ -357,8 +372,9 @@
       if (isMeaningfulReadonlySelection(text, targetEl)) {
         try {
           const range = sel.getRangeAt(0);
-          const rect = range.getBoundingClientRect();
-          showSelectionToolbar(rect.left + window.scrollX, rect.top + window.scrollY);
+          const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+          const anchorRect = rects[rects.length - 1] || range.getBoundingClientRect();
+          showSelectionToolbar(anchorRect.right + window.scrollX - 20, anchorRect.bottom + window.scrollY);
         } catch { hideSelectionToolbar(); }
       } else {
         hideSelectionToolbar();
@@ -445,14 +461,16 @@
         }
         if (msg.action === 'contextMenuSummarize') {
           if (!sidebarOpen) toggleSidebar();
-          const content = (document.body.innerText || '').substring(0, 8000);
+          const content = (document.body.innerText || '').trim();
           sendToSidebar({ source: 'wtp-content', action: 'summarize', content });
         }
         if (msg.action === 'tasksUpdated') {
           sendToSidebar({ source: 'wtp-content', ...msg });
+          refreshReminderIndicator();
         }
         if (msg.action === 'reminderTriggered') {
           sendToSidebar({ source: 'wtp-content', ...msg });
+          refreshReminderIndicator();
         }
       });
     } catch {
@@ -473,4 +491,5 @@
   // ── Init ──
   createFloatingButton();
   createSelectionToolbar();
+  refreshReminderIndicator();
 })();

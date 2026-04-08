@@ -22,6 +22,35 @@
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
 }
 
+#wtp-fab.wtp-has-alert::after {
+  content: attr(data-reminder-count);
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 8px 20px rgba(239, 68, 68, 0.35);
+}
+
+#wtp-fab.wtp-has-alert {
+  animation: wtp-fab-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes wtp-fab-pulse {
+  0%, 100% { box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4), 0 2px 8px rgba(0,0,0,0.15); }
+  50% { box-shadow: 0 4px 20px rgba(99, 102, 241, 0.55), 0 0 0 10px rgba(99, 102, 241, 0.12); }
+}
+
 #wtp-fab:hover {
   transform: scale(1.1);
   box-shadow: 0 6px 28px rgba(99, 102, 241, 0.55), 0 3px 12px rgba(0,0,0,0.2);

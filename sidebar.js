@@ -205,6 +205,22 @@
   function hideResult() { writeResult.style.display = 'none'; }
   function getWriteText() { return writeInput.value.trim(); }
 
+  async function runSummary(content) {
+    const text = String(content || '').trim();
+    if (!text) {
+      showToast('Enter or select some text first');
+      return;
+    }
+
+    try {
+      const summary = await sendMessage({ action: 'summarize', content: text });
+      lastResultText = summary;
+      showResult('Summary', `<div style="white-space:pre-wrap;">${escapeHTML(summary)}</div>`);
+    } catch (err) {
+      showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`);
+    }
+  }
+
   function legacyCopyText(text) {
     const temp = document.createElement('textarea');
     temp.value = text;
@@ -235,8 +251,7 @@
     if (!text) return showToast('Enter some text first');
     hideResult(); showLoading(writeLoading);
     try {
-      const result = await sendMessage({ action: 'ai:run', text, mode: selectedMode, task: 'rewrite' });
-      const outputText = result?.text || '';
+      const outputText = await sendMessage({ action: 'paraphrase', text, mode: selectedMode });
       lastResultText = outputText;
       showResult('Improved text', `<div style="white-space:pre-wrap;">${escapeHTML(outputText)}</div>`);
     } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
@@ -261,7 +276,15 @@
   // BUG-02 FIX: Summarize with 8s timeout
   // ══════════════════════════════════════
   btnSummarize.addEventListener('click', async () => {
+    const text = getWriteText();
     hideResult(); showLoading(writeLoading);
+
+    if (text) {
+      await runSummary(text);
+      hideLoading(writeLoading);
+      return;
+    }
+
     if (summarizeTimeoutId) clearTimeout(summarizeTimeoutId);
     summarizeTimeoutId = setTimeout(() => {
       hideLoading(writeLoading);
@@ -449,27 +472,23 @@
         break;
       case 'summarize':
         writeInput.value = data.content || '';
+        writeInput.scrollTop = 0;
         switchToPanel('write');
         (async () => {
           showLoading(writeLoading);
           if (summarizeTimeoutId) { clearTimeout(summarizeTimeoutId); summarizeTimeoutId = null; }
-          try {
-            const summary = await sendMessage({ action: 'summarize', content: data.content });
-            lastResultText = summary;
-            showResult('Summary', `<div style="white-space:pre-wrap;">${escapeHTML(summary)}</div>`);
-          } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
+          await runSummary(data.content);
           hideLoading(writeLoading);
         })();
         break;
       case 'pageContent':
         // BUG-02 FIX: Clear the summarize timeout
         if (summarizeTimeoutId) { clearTimeout(summarizeTimeoutId); summarizeTimeoutId = null; }
+        writeInput.value = data.content || '';
+        writeInput.scrollTop = 0;
+        switchToPanel('write');
         (async () => {
-          try {
-            const summary = await sendMessage({ action: 'summarize', content: data.content });
-            lastResultText = summary;
-            showResult('Summary', `<div style="white-space:pre-wrap;">${escapeHTML(summary)}</div>`);
-          } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
+          await runSummary(data.content);
           hideLoading(writeLoading);
         })();
         break;

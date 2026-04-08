@@ -61,9 +61,82 @@ function splitLongSentence(sentence, maxChars) {
   return parts;
 }
 
+function chunkByParagraphs(text, maxChars) {
+  const paragraphs = String(text || '')
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (!paragraphs.length) return [];
+
+  const chunks = [];
+  let current = '';
+
+  paragraphs.forEach((paragraph) => {
+    if (paragraph.length > maxChars) {
+      const sentences = splitSentences(paragraph);
+      if (!sentences.length) {
+        if (current) {
+          chunks.push(current);
+          current = '';
+        }
+        chunks.push(paragraph);
+        return;
+      }
+
+      sentences.forEach((sentence) => {
+        const parts = splitLongSentence(sentence, maxChars);
+        parts.forEach((part) => {
+          const candidate = current ? `${current} ${part}` : part;
+          if (candidate.length <= maxChars) {
+            current = candidate;
+          } else {
+            if (current) chunks.push(current);
+            current = part;
+          }
+        });
+      });
+      return;
+    }
+
+    const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+    } else {
+      if (current) chunks.push(current);
+      current = paragraph;
+    }
+  });
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function prepareSummarySource(text) {
+  const seen = new Set();
+  const lines = String(text || '')
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .filter((line) => line.length >= 20)
+    .filter((line) => !/^(share|copy link|advertisement|sponsored|sign in|log in|subscribe)$/i.test(line))
+    .filter((line) => {
+      const normalized = line.toLowerCase();
+      if (seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    });
+
+  return lines.join('\n\n');
+}
+
 function splitIntoChunks(text, task, mode) {
-  const normalized = String(text || '').trim();
+  const normalized = task === 'summarize' ? prepareSummarySource(text) : String(text || '').trim();
   if (!normalized) return [];
+
+  if (task === 'summarize') {
+    return chunkByParagraphs(normalized, 1200);
+  }
 
   const paragraphs = normalized.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
   const chunks = [];
@@ -116,6 +189,13 @@ function buildPrompt(task, text, mode, strict = false) {
       return `Correct grammar and spelling sentence by sentence. Do not summarize. Keep every name, fact, and detail. Return only the corrected text.\nText: ${cleaned}`;
     }
     return `Fix grammar and spelling. Keep the same meaning and keep all details. Return only the corrected text.\nText: ${cleaned}`;
+  }
+
+  if (task === 'summarize') {
+    if (strict) {
+      return `Summarize this content into a concise factual summary. Cover the main points only, do not rewrite line by line, do not copy long passages, and do not invent details. Return only the summary.\nText: ${cleaned}`;
+    }
+    return `Write a short summary of this content. Focus on the most important points, keep names and key facts, and omit minor detail. Return only the summary.\nText: ${cleaned}`;
   }
 
   const modePrompts = {
@@ -178,6 +258,7 @@ function hasRunawayRepetition(text) {
 
 function expectedMinRatio(task, mode) {
   if (task === 'grammar') return 0.65;
+  if (task === 'summarize') return 0.18;
   if (mode === 'shorten') return 0.35;
   return 0.55;
 }
@@ -193,7 +274,7 @@ function isSuspiciousOutput(input, output, task, mode) {
 
   const inputSentences = splitSentences(input).length;
   const outputSentences = splitSentences(output).length;
-  if (inputSentences > 1 && outputSentences === 1 && task !== 'grammar') {
+  if (inputSentences > 1 && outputSentences === 1 && task !== 'grammar' && task !== 'summarize') {
     return true;
   }
 
@@ -207,6 +288,7 @@ function isSuspiciousOutput(input, output, task, mode) {
     const preserved = [...inputTerms].filter((word) => outputTerms.has(word)).length;
     const ratio = preserved / inputTerms.size;
     if (task === 'grammar' && ratio < 0.55) return true;
+    if (task === 'summarize' && ratio < 0.15) return true;
     if (task !== 'grammar' && mode !== 'shorten' && ratio < 0.4) return true;
   }
 
@@ -289,6 +371,35 @@ async function generateChunk(task, mode, chunk) {
   return chunk;
 }
 
+async function summarizeChunks(chunks) {
+  const partials = [];
+
+  for (const chunk of chunks) {
+    partials.push(await generateChunk('summarize', null, chunk));
+  }
+
+  const combined = partials
+    .map((part) => normalizeSpacing(part))
+    .filter(Boolean)
+    .join(' ');
+
+  if (partials.length <= 1) {
+    return combined;
+  }
+
+  const combinedChunks = chunkByParagraphs(combined, 900);
+  if (combinedChunks.length <= 1) {
+    return await generateChunk('summarize', null, combined);
+  }
+
+  const reduced = [];
+  for (const chunk of combinedChunks) {
+    reduced.push(await generateChunk('summarize', null, chunk));
+  }
+
+  return normalizeSpacing(reduced.join(' '));
+}
+
 async function initModel(config) {
   if (generator) return { ready: true, model: config.modelId };
   if (initPromise) return initPromise;
@@ -336,6 +447,18 @@ async function runInference(payload) {
   const chunks = splitIntoChunks(payload.text, payload.task, effectiveMode);
   if (chunks.length === 0) {
     return { text: '' };
+  }
+
+  if (payload.task === 'summarize') {
+    const text = await summarizeChunks(chunks);
+    return {
+      text,
+      meta: {
+        model: runtimeConfig?.modelId || null,
+        task: payload.task || null,
+        mode: payload.mode || null
+      }
+    };
   }
 
   const parts = [];

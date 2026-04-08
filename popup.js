@@ -26,6 +26,38 @@
     root.setAttribute('data-theme', isDark ? 'dark' : 'light');
   }
 
+  function canInjectIntoTab(tab) {
+    const url = tab?.url || '';
+    return Boolean(url) && !/^(chrome|chrome-extension|edge|about|brave|moz-extension):/i.test(url);
+  }
+
+  async function ensureSidebarReady(tabId) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', panel: 'write' });
+      return true;
+    } catch {
+      // The content script may not exist yet on already-open tabs.
+    }
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || tab.id !== tabId || !canInjectIntoTab(tab)) {
+      return false;
+    }
+
+    await chrome.scripting.insertCSS({
+      target: { tabId },
+      files: ['content-styles.css']
+    });
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js']
+    });
+
+    await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', panel: 'write' });
+    return true;
+  }
+
   async function init() {
     try {
       const settings = await chrome.storage.local.get(['wtp_settings']);
@@ -33,6 +65,16 @@
       const tasks = await sendMessage({ action: 'getTasks' });
       const pendingTasks = (tasks || []).filter((task) => !task.completed);
       const container = document.getElementById('popup-tasks');
+      const readyBanner = document.getElementById('popup-ready-banner');
+      const readyCount = pendingTasks.filter((task) => task.attentionNeeded).length;
+
+      if (readyCount > 0) {
+        readyBanner.textContent = `${readyCount} reminder${readyCount === 1 ? '' : 's'} ready`;
+        readyBanner.classList.add('show');
+      } else {
+        readyBanner.textContent = '';
+        readyBanner.classList.remove('show');
+      }
 
       if (!pendingTasks.length) {
         container.innerHTML = '<div class="empty-text">No reminders yet</div>';
@@ -59,7 +101,7 @@
       try {
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (tab?.id) {
-          await chrome.tabs.sendMessage(tab.id, { action: 'openSidebar', panel: 'write' });
+          await ensureSidebarReady(tab.id);
         }
       } catch { }
       window.close();
