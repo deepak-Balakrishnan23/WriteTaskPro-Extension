@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WriteTask Pro</title>
+  <style>
+    :root {
+      --bg: #f7f7fc; --bg2: #ffffff; --bg3: #eef0ff;
+      --border: rgba(99,102,241,0.12); --text: #16162a; --text2: #666987; --text3: #8c8fa8;
+      --accent: #6366f1; --accent-h: #5558e6; --success: #16a34a; --warning: #f59e0b; --danger: #ef4444;
+      color-scheme: light;
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f0f17; --bg2: #161624; --bg3: #1e1e32;
+      --border: rgba(255,255,255,0.08); --text: #e4e4f0; --text2: #9c9cb8; --text3: #676783;
+      --accent: #6366f1; --accent-h: #818cf8; --success: #34d399; --warning: #fbbf24; --danger: #f87171;
+      color-scheme: dark;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); width: 340px; min-height: 200px; -webkit-font-smoothing: antialiased; }
+
+    .header { display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; border-bottom: 1px solid var(--border); }
+    .header svg { color: var(--accent); }
+    .header h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
+    .header .pro { background: linear-gradient(135deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+
+    .section { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+    .section-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text3); margin-bottom: 8px; }
+
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 8px 14px; border: none; border-radius: 8px; font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+    .btn-primary { background: var(--accent); color: #fff; width: 100%; }
+    .btn-primary:hover { background: var(--accent-h); }
+
+    .task-mini { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+    .task-mini + .task-mini { border-top: 1px solid var(--border); }
+    .task-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .task-dot.P1 { background: var(--danger); } .task-dot.P2 { background: var(--warning); }
+    .task-dot.P3 { background: var(--accent); } .task-dot.P4 { background: #6b7280; }
+    .task-dot.ready { background: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent); }
+    .task-mini-title { flex: 1; font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .task-mini-time { font-size: 10px; color: var(--text3); white-space: nowrap; }
+    .task-mini.ready .task-mini-time { color: var(--accent); font-weight: 700; }
+    .empty-text { font-size: 12px; color: var(--text3); text-align: center; padding: 8px 0; }
+
+    .helper-card { display: flex; flex-direction: column; gap: 6px; padding: 12px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; }
+    .helper-card strong { font-size: 13px; }
+    .helper-card p { font-size: 12px; color: var(--text2); line-height: 1.5; }
+    .footer { padding: 10px 16px; text-align: center; }
+    .footer .btn { width: 100%; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+    <h1>WriteTask <span class="pro">Pro</span></h1>
+  </div>
+
+  <div id="main-area">
+    <div class="section"><div class="section-title">Today's Tasks</div><div id="popup-tasks"></div></div>
+    <div class="section">
+      <div class="helper-card">
+        <strong>Open your workspace</strong>
+        <p>Use the sidebar to write, fix grammar, summarize, and manage reminders in one place.</p>
+      </div>
+    </div>
+    <div class="footer"><button class="btn btn-primary" id="popup-open-sidebar">Open Writing Sidebar</button></div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

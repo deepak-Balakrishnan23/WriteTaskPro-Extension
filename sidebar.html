@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WriteTask Pro</title>
+  <link rel="stylesheet" href="sidebar.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-left">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        <h1>WriteTask <span class="pro">Pro</span></h1>
+      </div>
+      <div class="header-right">
+        <button id="btn-settings" class="icon-btn" title="Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <button id="btn-close" class="icon-btn" title="Close Sidebar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <nav id="tab-bar">
+      <button class="tab active" data-tab="write"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> Write</button>
+      <button class="tab" data-tab="tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Tasks</button>
+    </nav>
+
+    <!-- Write Panel -->
+    <div id="panel-write" class="panel active">
+      <div class="section write-intro">
+        <label class="section-label">Your text</label>
+        <p class="section-help">Paste text and choose one action. Use advanced options only when you want a specific writing style.</p>
+        <textarea id="write-input" placeholder="Paste or type text here..." rows="6"></textarea>
+      </div>
+      <div class="section style-section">
+        <label class="section-label">Writing style</label>
+        <div class="style-badges">
+          <button class="mode-btn badge active" data-mode="standard">Standard</button>
+          <button class="mode-btn badge" data-mode="formal">Formal</button>
+          <button class="mode-btn badge" data-mode="casual">Casual</button>
+        </div>
+      </div>
+      <div class="primary-actions">
+        <button id="btn-paraphrase" class="action-btn primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> Improve</button>
+        <button id="btn-grammar" class="action-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Fix Grammar</button>
+        <button id="btn-summarize" class="action-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="21" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="3" y2="18"/></svg> Summarize</button>
+      </div>
+      <div id="write-result" class="result-area" style="display:none;">
+        <div class="result-header"><div class="result-heading"><span class="result-label">Result</span><span id="result-subtitle" class="result-subtitle">Improved text</span></div>
+          <div class="result-actions">
+            <button id="btn-copy-result" class="small-btn" title="Copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy</button>
+          </div>
+        </div>
+        <div id="result-content"></div>
+      </div>
+      <div id="write-loading" class="loading" style="display:none;"><div class="spinner"></div><span>Analyzing locally in your browser...</span></div>
+    </div>
+
+    <!-- Tasks Panel -->
+    <div id="panel-tasks" class="panel">
+      <div class="task-form">
+        <div class="section">
+          <label class="section-label">Quick add</label>
+          <p class="section-help">Pick a type, choose the reminder details, and save.</p>
+          <div class="ritual-badges">
+            <button class="ritual-btn active" data-kind="task">Task</button>
+            <button class="ritual-btn" data-kind="focus">Focus</button>
+            <button class="ritual-btn" data-kind="water">Water</button>
+            <button class="ritual-btn" data-kind="screen">Screen break</button>
+            <button class="ritual-btn" data-kind="tea">Tea</button>
+            <button class="ritual-btn" data-kind="lunch">Lunch</button>
+          </div>
+        </div>
+        <div class="section">
+          <label class="section-label">What should I remind you about?</label>
+          <textarea id="task-input" placeholder="What needs to be done?" rows="3"></textarea>
+        </div>
+        <div class="task-form-row" id="priority-row">
+          <div class="task-field">
+            <label class="section-label">Priority</label>
+            <div class="priority-badges">
+              <button class="priority-btn active" data-priority="P2">High</button>
+              <button class="priority-btn" data-priority="P3">Medium</button>
+              <button class="priority-btn" data-priority="P4">Low</button>
+            </div>
+          </div>
+        </div>
+        <div class="task-form-row" id="recurrence-row">
+          <div class="task-field">
+            <label class="section-label">Reminder type</label>
+            <div class="recurrence-badges">
+              <button class="recurrence-btn active" data-mode="once">One time</button>
+              <button class="recurrence-btn" data-mode="recurring">Recurring</button>
+            </div>
+          </div>
+        </div>
+        <div class="task-form-row" id="time-row" style="display:none;">
+          <div class="task-field">
+            <label class="section-label">Time</label>
+            <div id="time-badges" class="time-badges"></div>
+          </div>
+        </div>
+        <div class="task-form-row" id="duration-row">
+          <div class="task-field">
+            <label class="section-label">Remind me in</label>
+            <div class="duration-badges">
+              <button class="duration-btn active" data-minutes="15">15m</button>
+              <button class="duration-btn" data-minutes="30">30m</button>
+              <button class="duration-btn" data-minutes="45">45m</button>
+              <button class="duration-btn" data-minutes="60">1h</button>
+              <button class="duration-btn" data-minutes="120">2h</button>
+              <button class="duration-btn" data-minutes="180">3h</button>
+            </div>
+          </div>
+        </div>
+        <button id="btn-add-task" class="action-btn primary task-save-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Save Task</button>
+      </div>
+      <div id="task-loading" class="loading" style="display:none;"><div class="spinner"></div><span>Parsing task locally...</span></div>
+
+      <div id="task-list-view" class="task-view active">
+        <div id="task-list"></div>
+      </div>
+      <div class="task-note">Every item gets a timed reminder. When it pops up, you can mark it done or extend it by 15 minutes.</div>
+    </div>
+
+    <!-- Settings Panel -->
+    <div id="panel-settings" class="panel">
+      <h2 class="settings-title">Settings</h2>
+      <div class="setting-group"><label class="setting-label">Local mode</label><input type="text" value="All writing features run locally in your browser." readonly><p class="setting-hint">No API key, account, or cloud processing is required.</p></div>
+      <div class="setting-group"><label class="setting-label">ONNX model status</label><input type="text" value="Bundled FLAN-T5 ONNX model is configured for rewrite and grammar." readonly><p class="setting-hint">Model path: <code>models/flan-t5-small/onnx/</code></p></div>
+      <div class="setting-group"><label class="setting-label">Theme</label><select id="setting-theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+      <div class="settings-actions">
+        <button id="btn-save-settings" class="action-btn primary">Save Settings</button>
+        <button id="btn-close-settings" class="action-btn">Close</button>
+      </div>
+    </div>
+  </div>
+  <script src="sidebar.js"></script>
+</body>
+</html>

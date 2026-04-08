@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "WriteTask Pro",
+  "version": "1.0.0",
+  "description": "Local writing assistant, grammar helper, and task manager with no API keys or cloud processing.",
+  "permissions": [
+    "offscreen",
+    "storage",
+    "tabs",
+    "contextMenus",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content-styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "sidebar.html",
+        "offscreen.html",
+        "icons/*",
+        "ai-worker.js",
+        "vendor/*",
+        "models/*",
+        "models/flan-t5-small/*",
+        "models/flan-t5-small/onnx/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
