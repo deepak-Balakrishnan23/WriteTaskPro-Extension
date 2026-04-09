@@ -4,7 +4,6 @@
   "version": "1.0.0",
   "description": "Local writing assistant, grammar helper, and task manager with no API keys or cloud processing.",
   "permissions": [
-    "offscreen",
     "storage",
     "tabs",
     "scripting",
@@ -16,7 +15,7 @@
     "service_worker": "background.js"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+    "extension_pages": "script-src 'self'; object-src 'self';"
   },
   "action": {
     "default_popup": "popup.html",
@@ -45,13 +44,7 @@
     {
       "resources": [
         "sidebar.html",
-        "offscreen.html",
-        "icons/*",
-        "ai-worker.js",
-        "vendor/*",
-        "models/*",
-        "models/flan-t5-small/*",
-        "models/flan-t5-small/onnx/*"
+        "icons/*"
       ],
       "matches": ["<all_urls>"]
     }

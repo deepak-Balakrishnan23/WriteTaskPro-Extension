@@ -445,7 +445,12 @@
         // BUG-07 FIX: All messages use ready-gated sender
         if (msg.action === 'openSidebar') {
           if (!sidebarOpen) toggleSidebar();
-          sendToSidebar({ source: 'wtp-content', action: 'openPanel', panel: msg.panel || 'write' });
+          sendToSidebar({
+            source: 'wtp-content',
+            action: 'openPanel',
+            panel: msg.panel || 'write',
+            focusTaskId: msg.focusTaskId || null
+          });
         }
         if (msg.action === 'contextMenuParaphrase') {
           if (!sidebarOpen) toggleSidebar();

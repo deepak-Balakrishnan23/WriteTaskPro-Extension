@@ -37,102 +37,6 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === 'writetask-summarize') send({ action: 'contextMenuSummarize' });
 });
 
-const AI_RUNTIME_CONFIG = {
-  modelId: 'flan-t5-small',
-  modelsBaseUrl: chrome.runtime.getURL('models/'),
-  wasmBaseUrl: chrome.runtime.getURL('vendor/'),
-  runtimeUrl: chrome.runtime.getURL('vendor/transformers.web.js')
-};
-
-const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
-let creatingOffscreenDocument = null;
-let aiInitPromise = null;
-
-async function ensureOffscreenDocument(path = OFFSCREEN_DOCUMENT_PATH) {
-  const offscreenUrl = chrome.runtime.getURL(path);
-
-  if ('getContexts' in chrome.runtime) {
-    const contexts = await chrome.runtime.getContexts({
-      contextTypes: ['OFFSCREEN_DOCUMENT'],
-      documentUrls: [offscreenUrl]
-    });
-    if (contexts.length > 0) return;
-  }
-
-  if (creatingOffscreenDocument) {
-    await creatingOffscreenDocument;
-    return;
-  }
-
-  creatingOffscreenDocument = chrome.offscreen.createDocument({
-    url: path,
-    reasons: ['WORKERS'],
-    justification: 'Host a dedicated AI worker for local ONNX text generation.'
-  });
-
-  try {
-    await creatingOffscreenDocument;
-  } finally {
-    creatingOffscreenDocument = null;
-  }
-}
-
-async function sendToOffscreen(message) {
-  await ensureOffscreenDocument();
-  return new Promise((resolve, reject) => {
-    const requestId = `ai_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const port = chrome.runtime.connect({ name: 'ai-offscreen' });
-
-    const cleanup = () => {
-      try {
-        port.disconnect();
-      } catch { }
-    };
-
-    port.onMessage.addListener((response) => {
-      if (!response || response.requestId !== requestId) return;
-      cleanup();
-      if (response.ok) resolve(response.data);
-      else reject(response.error);
-    });
-
-    port.onDisconnect.addListener(() => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        reject({
-          code: 'OFFSCREEN_DISCONNECTED',
-          message: runtimeError.message
-        });
-      }
-    });
-
-    port.postMessage({ ...message, requestId });
-  });
-}
-
-async function initAiModel() {
-  if (aiInitPromise) return aiInitPromise;
-
-  aiInitPromise = sendToOffscreen({ action: 'ai:init', config: AI_RUNTIME_CONFIG })
-    .then((result) => result)
-    .catch((error) => {
-      aiInitPromise = null;
-      throw error;
-    });
-
-  return aiInitPromise;
-}
-
-async function runAiInference(payload) {
-  await initAiModel();
-  return sendToOffscreen({
-    action: 'ai:run',
-    text: payload.text,
-    mode: payload.mode || null,
-    task: payload.task || 'rewrite'
-  });
-}
-
 function normalizeWhitespace(text) {
   return (text || '').replace(/\s+/g, ' ').trim();
 }
@@ -831,70 +735,6 @@ function compressSummarySentence(sentence) {
   return truncateSummarySentence(ensureTrailingPunctuation(result));
 }
 
-function summarizePage(content) {
-  const rawLines = String(content || '')
-    .split(/\n+/)
-    .map((line) => normalizeWhitespace(line))
-    .filter((line) => line.length > 35);
-
-  const uniqueLines = [];
-  const seen = new Set();
-  rawLines.forEach((line) => {
-    const normalized = line.toLowerCase();
-    if (!seen.has(normalized)) {
-      seen.add(normalized);
-      uniqueLines.push(line);
-    }
-  });
-
-  const text = normalizeWhitespace(uniqueLines.join(' '));
-  if (!text) return '• No readable page content was found.';
-
-  const sentences = splitSentences(text)
-    .map((sentence) => cleanupSpacing(sentence))
-    .filter((sentence) => sentence.split(' ').length >= 8 && sentence.length <= 240);
-
-  if (sentences.length === 0) return `• ${text.slice(0, 180)}`;
-
-  const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'if', 'to', 'of', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were', 'be', 'by', 'as', 'at', 'it', 'this', 'that', 'from', 'their', 'there', 'about', 'into', 'over', 'after', 'before']);
-  const freq = new Map();
-
-  sentences.forEach((sentence) => {
-    sentence.toLowerCase().match(/\b[a-z]{4,}\b/g)?.forEach((word) => {
-      if (!stopWords.has(word)) freq.set(word, (freq.get(word) || 0) + 1);
-    });
-  });
-
-  const ranked = sentences
-    .map((sentence, index) => {
-      const baseScore = (sentence.toLowerCase().match(/\b[a-z]{4,}\b/g) || []).reduce((sum, word) => sum + (freq.get(word) || 0), 0);
-      const earlyBonus = index < 3 ? 8 - index * 2 : 0;
-      const penalty = sentence.length > 190 ? 5 : 0;
-      return { sentence, score: baseScore + earlyBonus - penalty, index };
-    })
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, 4)
-    .sort((a, b) => a.index - b.index);
-
-  const summaryParts = [];
-  const seenSummaries = new Set();
-
-  ranked.forEach((item) => {
-    const compressed = compressSummarySentence(item.sentence);
-    const key = compressed.toLowerCase();
-    if (!compressed || seenSummaries.has(key)) return;
-    seenSummaries.add(key);
-    summaryParts.push(compressed);
-  });
-
-  if (summaryParts.length === 0) {
-    return truncateSummarySentence(text, 160);
-  }
-
-  const intro = summaryParts[0];
-  const bullets = summaryParts.slice(1, 3).map((item) => `• ${item}`);
-  return [intro, ...bullets].join('\n');
-}
 
 function normalizeSummaryLines(content) {
   const seen = new Set();
@@ -1235,13 +1075,14 @@ function buildReminderPayload(task) {
 
 async function updateActionBadge(tasksInput = null) {
   const tasks = tasksInput || await getTasksFromStorage();
-  const attentionCount = tasks.filter((task) => !task.completed && task.attentionNeeded).length;
-  await chrome.action.setBadgeBackgroundColor({ color: '#6366f1' });
+  const readyTasks = tasks.filter((task) => !task.completed && task.attentionNeeded);
+  const attentionCount = readyTasks.length;
+  await chrome.action.setBadgeBackgroundColor({ color: attentionCount > 0 ? '#ef4444' : '#6366f1' });
   await chrome.action.setBadgeTextColor({ color: '#ffffff' });
   await chrome.action.setBadgeText({ text: attentionCount > 0 ? String(Math.min(attentionCount, 99)) : '' });
   await chrome.action.setTitle({
     title: attentionCount > 0
-      ? `WriteTask Pro (${attentionCount} reminder${attentionCount === 1 ? '' : 's'} ready)`
+      ? `WriteTask Pro (${attentionCount} reminder${attentionCount === 1 ? '' : 's'} ready${readyTasks[0]?.title ? `: ${readyTasks[0].title}` : ''})`
       : 'WriteTask Pro'
   });
 }
@@ -1354,14 +1195,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return checkGrammar(request.text);
         case 'fixGrammar':
           return applyStandardRewrite(request.text);
-        case 'ai:init':
-          return await initAiModel();
-        case 'ai:run':
-          return await runAiInference({
-            text: request.text,
-            mode: request.mode || null,
-            task: request.task || 'rewrite'
-          });
         case 'paraphrase':
           return paraphraseText(request.text, request.mode);
         case 'analyzeHumanizeText':
@@ -1455,3 +1288,5 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   handler().then(sendResponse);
   return true;
 });
+
+updateActionBadge().catch(() => {});

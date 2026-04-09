@@ -31,9 +31,9 @@
     return Boolean(url) && !/^(chrome|chrome-extension|edge|about|brave|moz-extension):/i.test(url);
   }
 
-  async function ensureSidebarReady(tabId) {
+  async function ensureSidebarReady(tabId, options = {}) {
     try {
-      await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', panel: 'write' });
+      await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', ...options });
       return true;
     } catch {
       // The content script may not exist yet on already-open tabs.
@@ -54,8 +54,15 @@
       files: ['content.js']
     });
 
-    await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', panel: 'write' });
+    await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', ...options });
     return true;
+  }
+
+  async function openSidebarOnActiveTab(options) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id) {
+      await ensureSidebarReady(tab.id, options);
+    }
   }
 
   async function init() {
@@ -67,6 +74,7 @@
       const container = document.getElementById('popup-tasks');
       const readyBanner = document.getElementById('popup-ready-banner');
       const readyCount = pendingTasks.filter((task) => task.attentionNeeded).length;
+      const firstReadyTask = pendingTasks.find((task) => task.attentionNeeded) || null;
 
       if (readyCount > 0) {
         readyBanner.textContent = `${readyCount} reminder${readyCount === 1 ? '' : 's'} ready`;
@@ -86,23 +94,38 @@
           return timeA - timeB;
         });
         container.innerHTML = pendingTasks.slice(0, 5).map((task) => `
-          <div class="task-mini ${task.attentionNeeded ? 'ready' : ''}">
+          <button class="task-mini ${task.attentionNeeded ? 'ready' : ''}" data-task-id="${escapeHTML(task.id)}" type="button">
             <div class="task-dot ${task.attentionNeeded ? 'ready' : task.priority}"></div>
             <div class="task-mini-title">${escapeHTML(task.title)}</div>
             <div class="task-mini-time">${escapeHTML(getReminderText(task))}</div>
-          </div>
+          </button>
         `).join('');
       }
+
+      container.addEventListener('click', async (event) => {
+        const item = event.target.closest('[data-task-id]');
+        if (!item) return;
+        try {
+          await openSidebarOnActiveTab({ panel: 'tasks', focusTaskId: item.dataset.taskId });
+        } catch { }
+        window.close();
+      });
+
+      const openButton = document.getElementById('popup-open-sidebar');
+      openButton.textContent = firstReadyTask ? 'Open Ready Task' : 'Open Writing Sidebar';
     } catch {
       document.getElementById('popup-tasks').innerHTML = '<div class="empty-text">Could not load tasks</div>';
     }
 
     document.getElementById('popup-open-sidebar').addEventListener('click', async () => {
       try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tab?.id) {
-          await ensureSidebarReady(tab.id);
-        }
+        const tasks = await sendMessage({ action: 'getTasks' });
+        const firstReadyTask = (tasks || []).find((task) => !task.completed && task.attentionNeeded) || null;
+        await openSidebarOnActiveTab(
+          firstReadyTask
+            ? { panel: 'tasks', focusTaskId: firstReadyTask.id }
+            : { panel: 'write' }
+        );
       } catch { }
       window.close();
     });

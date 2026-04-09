@@ -39,6 +39,8 @@
   let allTasks = [];
   let previousTab = 'write';           // BUG-01 FIX
   let summarizeTimeoutId = null;        // BUG-02 FIX
+  let focusedTaskId = null;
+  let focusHighlightTimer = null;
 
   // ── Theme ──
   function applyTheme(theme) {
@@ -150,10 +152,11 @@
 
   ritualBtns.forEach((btn) => {
     btn.addEventListener('click', () => {
+      const previousKind = selectedTaskKind;
       ritualBtns.forEach((item) => item.classList.remove('active'));
       btn.classList.add('active');
       selectedTaskKind = btn.dataset.kind;
-      applyTaskTemplate(selectedTaskKind);
+      applyTaskTemplate(selectedTaskKind, previousKind);
     });
   });
 
@@ -402,7 +405,24 @@
       ? `<div class="task-actions"><button class="task-action-btn" data-action="edit" data-id="${task.id}" title="Edit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button><button class="task-action-btn" data-action="delete" data-id="${task.id}" title="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></div>`
       : '';
     const editingClass = editingTaskId === task.id ? ' editing' : '';
-    return `<div class="task-item ${task.completed ? 'completed' : ''}${editingClass}" data-id="${task.id}">${leading}<div class="task-body"><div class="task-title">${escapeHTML(task.title)}</div><div class="task-meta">${reminderLabel ? `<span class="task-tag date">${escapeHTML(reminderLabel)}</span>` : ''}${scheduleTag ? `<span class="task-tag date">${escapeHTML(scheduleTag)}</span>` : ''}${kindLabel ? `<span class="task-tag kind">${escapeHTML(kindLabel)}</span>` : ''}${priorityTag}${recurrenceTag}${(task.labels || []).map(l => `<span class="task-tag label">${escapeHTML(l)}</span>`).join('')}</div></div>${actions}</div>`;
+    const readyClass = task.attentionNeeded ? ' ready' : '';
+    const focusedClass = focusedTaskId === task.id ? ' focused' : '';
+    return `<div class="task-item ${task.completed ? 'completed' : ''}${editingClass}${readyClass}${focusedClass}" data-id="${task.id}">${leading}<div class="task-body"><div class="task-title">${escapeHTML(task.title)}</div><div class="task-meta">${reminderLabel ? `<span class="task-tag date">${escapeHTML(reminderLabel)}</span>` : ''}${scheduleTag ? `<span class="task-tag date">${escapeHTML(scheduleTag)}</span>` : ''}${kindLabel ? `<span class="task-tag kind">${escapeHTML(kindLabel)}</span>` : ''}${priorityTag}${recurrenceTag}${(task.labels || []).map(l => `<span class="task-tag label">${escapeHTML(l)}</span>`).join('')}</div></div>${actions}</div>`;
+  }
+
+  function focusTaskInList(taskId) {
+    if (!taskId) return;
+    focusedTaskId = taskId;
+    renderTasks();
+    const card = Array.from(document.querySelectorAll('.task-item')).find((item) => item.dataset.id === taskId);
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('focused');
+    if (focusHighlightTimer) clearTimeout(focusHighlightTimer);
+    focusHighlightTimer = setTimeout(() => {
+      card.classList.remove('focused');
+      if (focusedTaskId === taskId) focusedTaskId = null;
+    }, 2600);
   }
 
   // ══════════════════════════════════════
@@ -451,6 +471,12 @@
     switch (data.action) {
       case 'openPanel':
         switchToPanel(data.panel || 'write');
+        if (data.focusTaskId) {
+          focusedTaskId = data.focusTaskId;
+          if ((data.panel || 'write') === 'tasks') {
+            loadTasks().then(() => focusTaskInList(data.focusTaskId)).catch(() => { });
+          }
+        }
         break;
       case 'paraphrase':
         writeInput.value = data.text;
@@ -541,12 +567,23 @@
     });
   }
 
-  function applyTaskTemplate(kind) {
+  function applyTaskTemplate(kind, previousKind = selectedTaskKind) {
     const template = taskTemplates[kind];
     if (!template) return;
-    if (!editingTaskId && (!taskInput.value.trim() || selectedTaskKind !== 'task')) {
-      taskInput.value = template.text;
+
+    if (!editingTaskId) {
+      const previousTemplateText = taskTemplates[previousKind]?.text || '';
+      const currentText = taskInput.value.trim();
+
+      if (kind === 'task') {
+        if (!currentText || currentText === previousTemplateText) {
+          taskInput.value = '';
+        }
+      } else if (!currentText || currentText === previousTemplateText || previousKind !== kind) {
+        taskInput.value = template.text;
+      }
     }
+
     if (kind === 'task') setPriority(template.priority);
     if (kind !== 'tea' && kind !== 'lunch') {
       setDuration(template.minutes);
