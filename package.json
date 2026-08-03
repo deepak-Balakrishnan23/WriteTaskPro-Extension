@@ -1,0 +1,18 @@
+{
+  "name": "writetask-pro",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local writing assistant, grammar helper, and task manager with no API keys or cloud processing.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:watch": "node --test --watch \"test/**/*.test.js\"",
+    "vendor": "node scripts/vendor-harper.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "harper.js": "^2.7.0"
+  }
+}
