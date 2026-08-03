@@ -134,20 +134,46 @@
 }
 
 .wtp-grammar-rule {
-  font-size: 14px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: #6b7280;
-  margin-bottom: 14px;
+  margin-bottom: 6px;
 }
 
+/* The engine's explanation of what is wrong. The previous card showed only
+   a replacement, with no reason attached. */
+.wtp-grammar-message {
+  font-size: 13px;
+  line-height: 1.45;
+  color: #374151;
+  margin-bottom: 12px;
+}
+
+/* One button per replacement the engine offered, not just the first. */
 .wtp-grammar-apply {
-  border: none;
-  background: transparent;
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid rgba(79, 70, 229, 0.25);
+  background: rgba(79, 70, 229, 0.06);
   color: #4f46e5;
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 15px;
+  font-weight: 650;
   cursor: pointer;
-  padding: 0;
-  margin-bottom: 18px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.wtp-grammar-apply:hover:not(:disabled) {
+  background: rgba(79, 70, 229, 0.12);
+}
+
+.wtp-grammar-apply:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .wtp-grammar-actions {
@@ -163,4 +189,44 @@
   font-size: 14px;
   cursor: pointer;
   padding: 0;
+}
+
+/* ── Accessibility ────────────────────────────────────────────
+   The card was previously unreachable by keyboard: it was dismissed on
+   any mousedown and never received focus. It is now focusable, closes on
+   Escape, and shows where focus is.
+   ───────────────────────────────────────────────────────────── */
+
+#wtp-grammar-card :focus-visible,
+#wtp-fab:focus-visible,
+#wtp-selection-toolbar button:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  #wtp-grammar-card {
+    background: #1f2430;
+    color: #e5e7eb;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  .wtp-grammar-message { color: #cbd5e1; }
+  .wtp-grammar-rule,
+  .wtp-grammar-actions button { color: #9ca3af; }
+  .wtp-grammar-apply {
+    color: #a5b4fc;
+    background: rgba(165, 180, 252, 0.1);
+    border-color: rgba(165, 180, 252, 0.28);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #wtp-sidebar-wrapper,
+  #wtp-fab,
+  #wtp-grammar-card,
+  #wtp-selection-toolbar {
+    transition: none !important;
+    animation: none !important;
+  }
 }
