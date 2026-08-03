@@ -116,3 +116,52 @@ test('strips boilerplate lines', () => {
 test('does not throw on very short content', () => {
   assert.doesNotThrow(() => buildBriefSummary('Too short.'));
 });
+
+/* ── Regression: long sentences emptied the candidate set ──────
+   MAX_SENTENCE_LENGTH excluded sentences over 220 characters
+   outright. When every sentence was long, nothing survived and
+   the summarizer reported "No summarizable sentences found" on
+   perfectly ordinary prose. The original code had the same cap
+   but fell back to truncating; that fallback was removed along
+   with truncation and nothing replaced it.
+   ───────────────────────────────────────────────────────────── */
+
+const LONG_A =
+  'The rally was organised by the local tribal council Swat Aman Jirga with participants raising ' +
+  'slogans and carrying placards to demand peace in the area that has seen deterioration in the ' +
+  'security situation in the past few months.';
+const LONG_B =
+  'Rescue teams took the wounded to nearby hospitals while police and other law enforcement ' +
+  'agencies cordoned off the entire area to begin collecting evidence from the site of the blast ' +
+  'as investigators arrived from the provincial capital later that afternoon.';
+
+test('summarizes prose made entirely of long sentences', () => {
+  const summary = buildBriefSummary(`${LONG_A}\n${LONG_B}`);
+  assert.doesNotMatch(
+    summary,
+    /No summarizable sentences found/,
+    `long sentences emptied the candidate set:\n${summary}`
+  );
+  assert.ok(summary.length > 40, `summary too short to be real:\n${summary}`);
+});
+
+test('a long sentence is still preserved whole, not clipped', () => {
+  const summary = buildBriefSummary(`${LONG_A}\n${LONG_B}`);
+  assert.doesNotMatch(summary, /\.\.\./, `clipped a sentence:\n${summary}`);
+});
+
+/* ── A single sentence cannot be extractively summarized ───────
+   Picking the top 3 of 1 sentence returns the input. The old
+   message was a dead end; it should say what to do instead.
+   ───────────────────────────────────────────────────────────── */
+
+test('a single sentence gets an actionable message, not a dead end', () => {
+  const summary = buildBriefSummary(LONG_A);
+  assert.doesNotMatch(summary, /No summarizable sentences found/);
+  assert.match(summary, /Improve/, `message should point at the right action:\n${summary}`);
+});
+
+test('two sentences are enough to summarize', () => {
+  const summary = buildBriefSummary(`${LONG_A}\n${LONG_B}`);
+  assert.doesNotMatch(summary, /at least/, `refused input it should have handled:\n${summary}`);
+});

@@ -38,7 +38,6 @@
   let lastResultText = '';
   let allTasks = [];
   let previousTab = 'write';           // BUG-01 FIX
-  let summarizeTimeoutId = null;        // BUG-02 FIX
   let focusedTaskId = null;
   let focusHighlightTimer = null;
 
@@ -215,13 +214,9 @@
       return;
     }
 
-    try {
-      const summary = await sendMessage({ action: 'summarize', content: text });
-      lastResultText = summary;
-      showResult('Summary', `<div style="white-space:pre-wrap;">${escapeHTML(summary)}</div>`);
-    } catch (err) {
-      showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`);
-    }
+    const summary = await sendMessage({ action: 'summarize', content: text });
+    lastResultText = summary;
+    showResult('Summary', `<div style="white-space:pre-wrap;">${escapeHTML(summary)}</div>`);
   }
 
   function legacyCopyText(text) {
@@ -248,18 +243,52 @@
     return copied;
   }
 
-  // ── Paraphrase ──
-  btnParaphrase.addEventListener('click', async () => {
-    const text = getWriteText();
-    if (!text) return showToast('Enter some text first');
-    hideResult(); showLoading(writeLoading);
+  /* ── Action buttons ────────────────────────────────────────────
+     The "primary" class used to be hardcoded on Improve in the HTML,
+     so Improve looked permanently selected and clicking Summarize
+     produced no visible change at all — it ran, but nothing said so.
+     The highlight now follows whichever action was last used, and all
+     three are disabled while one is working, which also stops a second
+     click racing the first.
+     ───────────────────────────────────────────────────────────── */
+  const actionBtns = [btnParaphrase, btnGrammar, btnSummarize];
+
+  function setActionsBusy(busy, active = null) {
+    actionBtns.forEach((btn) => {
+      btn.disabled = busy;
+      btn.classList.toggle('working', busy && btn === active);
+      if (busy && btn === active) btn.setAttribute('aria-busy', 'true');
+      else btn.removeAttribute('aria-busy');
+    });
+  }
+
+  /* Wraps every write action so the spinner and button state are always
+     restored, even when the work throws. Previously hideLoading sat after
+     the try/catch, so an unexpected throw left the spinner running. */
+  async function runAction(button, work, { requireText = true } = {}) {
+    if (requireText && !getWriteText()) return showToast('Enter some text first');
+
+    actionBtns.forEach((btn) => btn.classList.toggle('primary', btn === button));
+    setActionsBusy(true, button);
+    hideResult();
+    showLoading(writeLoading);
+
     try {
-      const outputText = await sendMessage({ action: 'paraphrase', text, mode: selectedMode });
-      lastResultText = outputText;
-      showResult('Improved text', `<div style="white-space:pre-wrap;">${escapeHTML(outputText)}</div>`);
-    } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
-    hideLoading(writeLoading);
-  });
+      await work();
+    } catch (err) {
+      showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`);
+    } finally {
+      hideLoading(writeLoading);
+      setActionsBusy(false);
+    }
+  }
+
+  // ── Paraphrase ──
+  btnParaphrase.addEventListener('click', () => runAction(btnParaphrase, async () => {
+    const outputText = await sendMessage({ action: 'paraphrase', text: getWriteText(), mode: selectedMode });
+    lastResultText = outputText;
+    showResult('Improved text', `<div style="white-space:pre-wrap;">${escapeHTML(outputText)}</div>`);
+  }));
 
   // ── Grammar ──
   const SEVERITY_LABELS = { spelling: 'Spelling', grammar: 'Grammar', style: 'Style' };
@@ -327,22 +356,15 @@
 
   let currentIssues = [];
 
-  async function runGrammarCheck() {
-    const text = getWriteText();
-    if (!text) return showToast('Enter some text first');
-
-    hideResult();
-    showLoading(writeLoading);
-    try {
+  function runGrammarCheck() {
+    return runAction(btnGrammar, async () => {
+      // An engine failure propagates to runAction, which shows it. Returning
+      // an empty list here would read as "your text is clean".
       const issues = await sendMessage({ action: 'checkGrammar', text: writeInput.value });
       currentIssues = Array.isArray(issues) ? issues : [];
       lastResultText = writeInput.value;
       renderIssues(writeInput.value, currentIssues);
-    } catch (err) {
-      // An engine failure must never look like clean text.
-      showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`);
-    }
-    hideLoading(writeLoading);
+    });
   }
 
   btnGrammar.addEventListener('click', runGrammarCheck);
@@ -355,26 +377,39 @@
   });
 
   // ══════════════════════════════════════
-  // BUG-02 FIX: Summarize with 8s timeout
-  // ══════════════════════════════════════
-  btnSummarize.addEventListener('click', async () => {
-    const text = getWriteText();
-    hideResult(); showLoading(writeLoading);
+  /* Summarizing with an empty box means "summarize this page", so the content
+     is fetched from the content script. That reply arrives asynchronously, so
+     it is wrapped in a promise — otherwise runAction would clear the spinner
+     and re-enable the buttons before the content ever came back. */
+  let pageContentResolver = null;
 
-    if (text) {
-      await runSummary(text);
-      hideLoading(writeLoading);
-      return;
+  function requestPageContent(timeoutMs = 8000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pageContentResolver = null;
+        reject(new Error("Could not read this page. Open a normal web page and try again — browser settings pages cannot be read."));
+      }, timeoutMs);
+
+      pageContentResolver = (content) => {
+        clearTimeout(timer);
+        pageContentResolver = null;
+        resolve(content);
+      };
+
+      window.parent.postMessage({ source: 'wtp-sidebar', action: 'getPageContent' }, '*');
+    });
+  }
+
+  btnSummarize.addEventListener('click', () => runAction(btnSummarize, async () => {
+    let text = getWriteText();
+    if (!text) {
+      text = String(await requestPageContent() || '').trim();
+      writeInput.value = text;
+      writeInput.scrollTop = 0;
+      if (!text) throw new Error('This page has no readable text to summarize.');
     }
-
-    if (summarizeTimeoutId) clearTimeout(summarizeTimeoutId);
-    summarizeTimeoutId = setTimeout(() => {
-      hideLoading(writeLoading);
-      showResult('Error', '<div style="color:var(--danger);">Could not retrieve page content. Make sure you\'re on a regular webpage (not a browser settings page).</div>');
-      summarizeTimeoutId = null;
-    }, 8000);
-    window.parent.postMessage({ source: 'wtp-sidebar', action: 'getPageContent' }, '*');
-  });
+    await runSummary(text);
+  }, { requireText: false }));
 
   // ── Copy & Replace ──
   btnCopyResult.addEventListener('click', async () => {
@@ -583,23 +618,11 @@
         writeInput.value = data.content || '';
         writeInput.scrollTop = 0;
         switchToPanel('write');
-        (async () => {
-          showLoading(writeLoading);
-          if (summarizeTimeoutId) { clearTimeout(summarizeTimeoutId); summarizeTimeoutId = null; }
-          await runSummary(data.content);
-          hideLoading(writeLoading);
-        })();
+        runAction(btnSummarize, () => runSummary(data.content), { requireText: false });
         break;
       case 'pageContent':
-        // BUG-02 FIX: Clear the summarize timeout
-        if (summarizeTimeoutId) { clearTimeout(summarizeTimeoutId); summarizeTimeoutId = null; }
-        writeInput.value = data.content || '';
-        writeInput.scrollTop = 0;
         switchToPanel('write');
-        (async () => {
-          await runSummary(data.content);
-          hideLoading(writeLoading);
-        })();
+        if (pageContentResolver) pageContentResolver(data.content || '');
         break;
       case 'tasksUpdated':
         loadTasks();
