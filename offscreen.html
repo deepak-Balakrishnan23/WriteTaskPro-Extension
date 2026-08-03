@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WriteTask Pro engine host</title>
+</head>
+<body>
+  <!-- No UI. This document exists only to keep one warm Harper instance
+       alive, because the service worker is torn down after 30 seconds
+       idle and re-instantiating the WASM costs about half a second. -->
+  <script type="module" src="engine/offscreen.js"></script>
+</body>
+</html>
