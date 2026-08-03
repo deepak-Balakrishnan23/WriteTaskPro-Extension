@@ -1,10 +1,13 @@
 /* =========================================================
-   WriteTask Pro — Content Script (ALL BUGS FIXED)
-   
-   BUG-07 FIX: Sidebar iframe ready-state handshake with message queue
-   BUG-10 FIX: Truncate page content to 8000 chars before postMessage
-   BUG-13 FIX: Safer text replacement with execCommand fallback
-   BUG-14 FIX: Changed shortcut to Ctrl+Shift+E (no browser conflict)
+   WriteTask Pro — Content Script
+
+   Runs on every page: the floating button, the selection toolbar,
+   the inline grammar card, and the sidebar iframe host.
+
+   Known limitation, by design until Phase 1: applying a suggestion
+   replaces the whole field, so it is refused on any contentEditable
+   that holds markup. Replacing just the issue's range needs
+   character offsets from the grammar engine.
    ========================================================= */
 
 (() => {
@@ -28,6 +31,8 @@
     try {
       return Boolean(chrome?.runtime?.id);
     } catch {
+      // Touching chrome.runtime after the extension reloads throws; that is
+      // the signal we are testing for, so there is nothing to report.
       return false;
     }
   }
@@ -36,9 +41,47 @@
     if (!isRuntimeAvailable()) return null;
     try {
       return chrome.runtime.getURL(path);
-    } catch {
+    } catch (err) {
+      logDebug('getURL failed', err);
       return null;
     }
+  }
+
+  /* Bare `catch {}` is how a ReferenceError in showGrammarCard went
+     unnoticed long enough to ship — the inline grammar card threw on
+     every single invocation and nothing ever surfaced it. */
+  function logDebug(message, err) {
+    if (err) console.debug('[WriteTask Pro]', message, err);
+    else console.debug('[WriteTask Pro]', message);
+  }
+
+  function escapeHTML(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  /* The origin of our own extension pages, used to authenticate messages
+     that claim to come from the sidebar iframe. */
+  const EXTENSION_ORIGIN = (() => {
+    const url = getRuntimeUrl('');
+    return url ? url.replace(/\/$/, '') : null;
+  })();
+
+  /* Without this check, any page could post
+     {source:'wtp-sidebar', action:'replaceSelection', text:'...'} to its own
+     window and we would write that text into whatever the user was typing
+     in — landing inside the host editor's undo stack via execCommand.
+     Checking event.source and event.origin is what makes the channel real:
+     data.source is attacker-controlled, the other two are not. */
+  function isTrustedSidebarMessage(event) {
+    if (!sidebarFrame || event.source !== sidebarFrame.contentWindow) return false;
+    if (EXTENSION_ORIGIN && event.origin !== EXTENSION_ORIGIN) return false;
+    return event.data?.source === 'wtp-sidebar';
   }
 
   function sendRuntimeMessage(message) {
@@ -65,9 +108,21 @@
   // ══════════════════════════════════════
   // BUG-07 FIX: Send with ready-gate
   // ══════════════════════════════════════
+  /* Targeted at the extension origin rather than a wildcard, so the host
+     page never receives a copy of what we send our own sidebar. If we
+     cannot determine our origin the extension context is already gone, so
+     this fails closed rather than broadcasting. */
+  function postToSidebar(msg) {
+    if (!EXTENSION_ORIGIN) {
+      logDebug('not posting to sidebar: extension origin unknown');
+      return;
+    }
+    sidebarFrame.contentWindow.postMessage(msg, EXTENSION_ORIGIN);
+  }
+
   function sendToSidebar(msg) {
     if (sidebarReady && sidebarFrame?.contentWindow) {
-      sidebarFrame.contentWindow.postMessage(msg, '*');
+      postToSidebar(msg);
     } else {
       pendingMessages.push(msg);
     }
@@ -75,15 +130,20 @@
 
   function flushPendingMessages() {
     if (!sidebarFrame?.contentWindow) return;
-    const msgs = pendingMessages.splice(0);
-    msgs.forEach(msg => sidebarFrame.contentWindow.postMessage(msg, '*'));
+    pendingMessages.splice(0).forEach(postToSidebar);
   }
 
   // ── Floating Action Button ──
+  /* A real <button>, not a <div> with a click handler — the div was not
+     focusable, exposed no role, and had no accessible name beyond a title
+     attribute, so keyboard and screen reader users could not open the
+     sidebar at all. */
   function createFloatingButton() {
-    floatingBtn = document.createElement('div');
+    floatingBtn = document.createElement('button');
     floatingBtn.id = 'wtp-fab';
-    floatingBtn.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
+    floatingBtn.type = 'button';
+    floatingBtn.setAttribute('aria-label', 'Open WriteTask Pro');
+    floatingBtn.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
     floatingBtn.title = 'WriteTask Pro';
     floatingBtn.addEventListener('click', toggleSidebar);
     document.body.appendChild(floatingBtn);
@@ -96,7 +156,8 @@
       const readyCount = (tasks || []).filter((task) => !task.completed && task.attentionNeeded).length;
       floatingBtn.classList.toggle('wtp-has-alert', readyCount > 0);
       floatingBtn.dataset.reminderCount = readyCount > 0 ? String(Math.min(readyCount, 9)) : '';
-    } catch {
+    } catch (err) {
+      logDebug('could not refresh reminder indicator', err);
       floatingBtn.classList.remove('wtp-has-alert');
       floatingBtn.dataset.reminderCount = '';
     }
@@ -122,9 +183,9 @@
     pendingMessages = [];
 
     window.addEventListener('message', (e) => {
-      if (e.data?.source !== 'wtp-sidebar') return;
+      if (!isTrustedSidebarMessage(e)) return;
 
-      // BUG-07 FIX: Handshake — sidebar announces it's ready
+      // Handshake — the sidebar announces it is ready to receive.
       if (e.data.action === 'sidebarReady') {
         sidebarReady = true;
         flushPendingMessages();
@@ -193,18 +254,18 @@
     return '';
   }
 
-  function setEditableText(el, text) {
-    if (!el) return;
-    if (isTextInputElement(el)) {
-      el.value = text;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
-    if (el.isContentEditable) {
-      el.innerText = text;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+  /* True when a contentEditable holds markup we would destroy by replacing
+     its text: links, bold runs, lists, embeds. A bare <br> does not count. */
+  function hasRichContent(el) {
+    if (!el?.isContentEditable) return false;
+    return Array.from(el.childNodes).some(
+      (node) => node.nodeType === Node.ELEMENT_NODE && node.nodeName !== 'BR'
+    );
   }
+
+  /* setEditableText is gone. It replaced the entire field, which discarded
+     every link, list and bold run in a rich editor. Suggestions are now
+     applied to just the issue's span — see applyIssueToField. */
 
   function countWords(text) {
     return (String(text || '').trim().match(/\b[\w']+\b/g) || []).length;
@@ -296,19 +357,135 @@
 
   function pickBestGrammarIssue(issues) {
     if (!Array.isArray(issues) || issues.length === 0) return null;
-    const preferred = issues.find((issue) => issue?.rule && issue.rule !== 'Suggested correction');
-    return preferred || issues[0] || null;
+    // Spelling first: it is the least debatable and cheapest to accept.
+    const bySeverity = { spelling: 0, grammar: 1, style: 2 };
+    return [...issues]
+      .filter((issue) => issue?.replacements?.length)
+      .sort((a, b) => (bySeverity[a.severity] ?? 3) - (bySeverity[b.severity] ?? 3) || a.offset - b.offset)[0] || null;
   }
+
+  /* An issue's offsets describe the text at the moment it was checked. The
+     user keeps typing, so verify the span still holds what was flagged
+     before touching anything. Applying a stale issue would corrupt text
+     that was never reported. */
+  function isIssueStale(text, issue) {
+    if (typeof text !== 'string' || !issue) return true;
+    const end = issue.offset + issue.length;
+    if (issue.offset < 0 || end > text.length) return true;
+    return text.slice(issue.offset, end) !== issue.problemText;
+  }
+
+  /* Maps a character offset in an element's text to a DOM Range, so a
+     suggestion can be applied to just that span. Only walks text nodes,
+     which is why rich fields are still declined. */
+  function rangeForOffset(root, offset, length) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let seen = 0;
+    let startNode = null;
+    let startOffset = 0;
+    let endNode = null;
+    let endOffset = 0;
+
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const nodeLength = node.textContent.length;
+      if (!startNode && seen + nodeLength >= offset) {
+        startNode = node;
+        startOffset = offset - seen;
+      }
+      if (startNode && seen + nodeLength >= offset + length) {
+        endNode = node;
+        endOffset = offset + length - seen;
+        break;
+      }
+      seen += nodeLength;
+    }
+
+    if (!startNode || !endNode) return null;
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    return range;
+  }
+
+  /* Applies one replacement to only the issue's span.
+
+     For inputs and textareas setRangeText is used, which the browser
+     records on the field's native undo stack — so the user can press
+     Ctrl+Z. That is the whole reason the offsets in the issue contract
+     matter: the previous version replaced the entire field, discarding
+     every link, list and bold run in a rich editor. */
+  function applyIssueToField(el, issue, replacement) {
+    const text = getEditableText(el);
+    if (isIssueStale(text, issue)) return 'stale';
+
+    const end = issue.offset + issue.length;
+    const insert = replacement.kind === 'insertAfter'
+      ? issue.problemText + replacement.text
+      : replacement.kind === 'remove' ? '' : replacement.text;
+
+    if (isTextInputElement(el)) {
+      el.setRangeText(insert, issue.offset, end, 'end');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return 'applied';
+    }
+
+    if (el.isContentEditable) {
+      if (hasRichContent(el)) return 'rich';
+      const range = rangeForOffset(el, issue.offset, issue.length);
+      if (!range) return 'stale';
+
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+
+      let ok = false;
+      try {
+        ok = document.execCommand('insertText', false, insert);
+      } catch (err) {
+        logDebug('execCommand insertText failed on range', err);
+      }
+      if (!ok) {
+        range.deleteContents();
+        if (insert) range.insertNode(document.createTextNode(insert));
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return 'applied';
+    }
+
+    return 'unsupported';
+  }
+
+  const SEVERITY_LABELS = {
+    spelling: 'Spelling',
+    grammar: 'Grammar',
+    style: 'Style'
+  };
 
   function showGrammarCard(issue, anchorRect, options = {}) {
     hideGrammarCard();
     grammarSelectionRange = options.range || null;
     grammarEditableTarget = options.editableTarget || null;
+
     grammarCard = document.createElement('div');
     grammarCard.id = 'wtp-grammar-card';
+    grammarCard.setAttribute('role', 'dialog');
+    grammarCard.setAttribute('aria-label', 'Writing suggestion');
+
+    // Offer every replacement the engine returned, not just the first.
+    const buttons = issue.replacements
+      .slice(0, 3)
+      .map((replacement, index) => {
+        const label = replacement.kind === 'remove'
+          ? `Remove “${escapeHTML(issue.problemText)}”`
+          : escapeHTML(replacement.text);
+        return `<button class="wtp-grammar-apply" type="button" data-index="${index}">${label}</button>`;
+      })
+      .join('');
+
     grammarCard.innerHTML = `
-      <div class="wtp-grammar-rule">${escapeHTML(issue.rule || 'Grammar suggestion')}</div>
-      <button class="wtp-grammar-apply" type="button">${escapeHTML(issue.replacement || issue.suggestion || '')}</button>
+      <div class="wtp-grammar-rule">${escapeHTML(SEVERITY_LABELS[issue.severity] || 'Suggestion')}</div>
+      <div class="wtp-grammar-message">${escapeHTML(issue.message)}</div>
+      ${buttons}
       <div class="wtp-grammar-actions">
         <button type="button" data-action="dismiss">Dismiss</button>
       </div>
@@ -321,23 +498,49 @@
     grammarCard.style.top = `${top}px`;
     grammarCard.style.left = `${Math.max(12, left)}px`;
 
+    // Keyboard users could not reach this card at all before.
+    grammarCard.querySelector('.wtp-grammar-apply, [data-action="dismiss"]')?.focus();
+    grammarCard.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        hideGrammarCard();
+      }
+    });
+
     grammarCard.addEventListener('click', (event) => {
-      const dismiss = event.target.closest('[data-action="dismiss"]');
-      if (dismiss) {
+      if (event.target.closest('[data-action="dismiss"]')) {
         hideGrammarCard();
         return;
       }
 
       const apply = event.target.closest('.wtp-grammar-apply');
-      if (apply) {
-        if (grammarEditableTarget) {
-          setEditableText(grammarEditableTarget, issue.replacement || issue.suggestion || '');
-        } else {
-          restoreSelectionRange(grammarSelectionRange);
-          replaceSelectedText(issue.replacement || issue.suggestion || '');
-        }
+      if (!apply) return;
+
+      const replacement = issue.replacements[Number(apply.dataset.index)];
+      if (!replacement) return;
+
+      if (!grammarEditableTarget) {
+        restoreSelectionRange(grammarSelectionRange);
+        replaceSelectedText(replacement.text);
         hideGrammarCard();
+        return;
       }
+
+      const outcome = applyIssueToField(grammarEditableTarget, issue, replacement);
+      if (outcome === 'applied') {
+        hideGrammarCard();
+        return;
+      }
+
+      // Say what happened rather than appearing to do nothing.
+      const messages = {
+        rich: 'Cannot apply here without losing formatting',
+        stale: 'The text changed — checking again',
+        unsupported: 'Cannot apply here'
+      };
+      const notice = grammarCard.querySelector('.wtp-grammar-message');
+      if (notice) notice.textContent = messages[outcome] || messages.unsupported;
+      grammarCard.querySelectorAll('.wtp-grammar-apply').forEach((btn) => { btn.disabled = true; });
     });
   }
 
@@ -358,7 +561,9 @@
 
       const rect = target.getBoundingClientRect();
       showGrammarCard(firstIssue, rect, { editableTarget: target });
-    } catch { }
+    } catch (err) {
+      logDebug('inline grammar check failed', err);
+    }
   }
 
   // ── Text Selection Listener ──
@@ -375,7 +580,10 @@
           const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
           const anchorRect = rects[rects.length - 1] || range.getBoundingClientRect();
           showSelectionToolbar(anchorRect.right + window.scrollX - 20, anchorRect.bottom + window.scrollY);
-        } catch { hideSelectionToolbar(); }
+        } catch (err) {
+          logDebug('could not position selection toolbar', err);
+          hideSelectionToolbar();
+        }
       } else {
         hideSelectionToolbar();
       }
@@ -422,8 +630,8 @@
         // execCommand preserves undo stack and editor state in rich editors
         document.execCommand('insertText', false, newText);
         return;
-      } catch {
-        // Fallback to range manipulation
+      } catch (err) {
+        logDebug('execCommand insertText failed, falling back to range', err);
       }
     }
 
@@ -433,7 +641,9 @@
       range.deleteContents();
       range.insertNode(document.createTextNode(newText));
       sel.removeAllRanges();
-    } catch { }
+    } catch (err) {
+      logDebug('could not replace selection', err);
+    }
   }
 
   // ── Messages from background ──
@@ -478,8 +688,9 @@
           refreshReminderIndicator();
         }
       });
-    } catch {
-      // Ignore stale extension context after reload.
+    } catch (err) {
+      // A stale extension context after reload is expected; anything else is not.
+      logDebug('could not register runtime listener', err);
     }
   }
 
