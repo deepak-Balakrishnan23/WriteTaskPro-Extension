@@ -262,17 +262,96 @@
   });
 
   // ── Grammar ──
-  btnGrammar.addEventListener('click', async () => {
+  const SEVERITY_LABELS = { spelling: 'Spelling', grammar: 'Grammar', style: 'Style' };
+
+  /* Renders the issue list from the engine. Nothing is applied automatically:
+     the user picks a replacement, one issue at a time. The previous version
+     showed a single rewritten blob with no explanation of what changed, which
+     is how it managed to hand back "I want my holiday approved approval." */
+  function renderIssues(text, issues) {
+    if (!issues.length) {
+      showResult('Grammar check', '<div class="issue-clean">No issues found.</div>');
+      return;
+    }
+
+    const rows = issues.map((issue, index) => {
+      const context = text.slice(
+        Math.max(0, issue.offset - 32),
+        Math.min(text.length, issue.offset + issue.length + 32)
+      );
+      const buttons = issue.replacements.slice(0, 3).map((replacement, choice) => {
+        const label = replacement.kind === 'remove'
+          ? `Remove “${escapeHTML(issue.problemText)}”`
+          : escapeHTML(replacement.text);
+        return `<button class="issue-fix" data-issue="${index}" data-choice="${choice}">${label}</button>`;
+      }).join('');
+
+      return `
+        <div class="issue" data-issue="${index}">
+          <div class="issue-head">
+            <span class="issue-sev ${escapeHTML(issue.severity)}">${escapeHTML(SEVERITY_LABELS[issue.severity] || 'Suggestion')}</span>
+            <code class="issue-word">${escapeHTML(issue.problemText)}</code>
+          </div>
+          <div class="issue-msg">${escapeHTML(issue.message)}</div>
+          <div class="issue-context">…${escapeHTML(context)}…</div>
+          <div class="issue-fixes">${buttons}</div>
+        </div>`;
+    }).join('');
+
+    const count = `${issues.length} issue${issues.length === 1 ? '' : 's'}`;
+    showResult(count, rows);
+  }
+
+  /* Applying edits the textarea in place, so offsets shift. Re-checking after
+     each apply keeps the remaining issues honest rather than letting the user
+     accept a suggestion whose position is already wrong. */
+  async function applyIssueInInput(issue, choice) {
+    const text = writeInput.value;
+    const end = issue.offset + issue.length;
+
+    if (text.slice(issue.offset, end) !== issue.problemText) {
+      showToast('Text changed — rechecking');
+      return runGrammarCheck();
+    }
+
+    const replacement = issue.replacements[choice];
+    if (!replacement) return;
+
+    const insert = replacement.kind === 'insertAfter'
+      ? issue.problemText + replacement.text
+      : replacement.kind === 'remove' ? '' : replacement.text;
+
+    writeInput.setRangeText(insert, issue.offset, end, 'end');
+    await runGrammarCheck();
+  }
+
+  let currentIssues = [];
+
+  async function runGrammarCheck() {
     const text = getWriteText();
     if (!text) return showToast('Enter some text first');
-    hideResult(); showLoading(writeLoading);
+
+    hideResult();
+    showLoading(writeLoading);
     try {
-      const corrected = await sendMessage({ action: 'fixGrammar', text });
-      const outputText = typeof corrected === 'string' ? corrected : corrected?.text || '';
-      lastResultText = outputText || text;
-      showResult('Grammar fix', `<div style="white-space:pre-wrap;">${escapeHTML(outputText || text)}</div>`);
-    } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
+      const issues = await sendMessage({ action: 'checkGrammar', text: writeInput.value });
+      currentIssues = Array.isArray(issues) ? issues : [];
+      lastResultText = writeInput.value;
+      renderIssues(writeInput.value, currentIssues);
+    } catch (err) {
+      // An engine failure must never look like clean text.
+      showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`);
+    }
     hideLoading(writeLoading);
+  }
+
+  btnGrammar.addEventListener('click', runGrammarCheck);
+
+  resultContent.addEventListener('click', (event) => {
+    const fix = event.target.closest('.issue-fix');
+    if (!fix) return;
+    const issue = currentIssues[Number(fix.dataset.issue)];
+    if (issue) applyIssueInInput(issue, Number(fix.dataset.choice));
   });
 
   // ══════════════════════════════════════
@@ -465,6 +544,10 @@
 
   // ── Handle Messages from Content Script ──
   function handleContentMessage(event) {
+    // Only the embedding page's content script may drive the sidebar.
+    // data.source is attacker-controlled; event.source is not.
+    if (event.source !== window.parent) return;
+
     const data = event.data;
     if (data?.source !== 'wtp-content') return;
 

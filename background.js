@@ -7,6 +7,18 @@
    - All writing/task logic runs in-browser
    ========================================================= */
 
+import { sentenceTexts, mapBlocks } from './lib/segment.js';
+import { buildBriefSummary } from './lib/summarize.js';
+import { lintText, engineReady } from './lib/engine-client.js';
+import {
+  normalizeWhitespace,
+  titleCase,
+  escapeRegExp,
+  cleanupSpacing,
+  sentenceCaseText,
+  ensureTrailingPunctuation
+} from './lib/text.js';
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({ id: 'writetask-paraphrase', title: 'WriteTask Pro: Paraphrase Selection', contexts: ['selection'] });
@@ -37,24 +49,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   else if (info.menuItemId === 'writetask-summarize') send({ action: 'contextMenuSummarize' });
 });
 
-function normalizeWhitespace(text) {
-  return (text || '').replace(/\s+/g, ' ').trim();
-}
-
+/* Sentence splitting lives in lib/segment.js, and the string helpers in
+   lib/text.js. The regex splitter that used to be here treated every
+   period as a terminator, so decimals, honorifics, initialisms and
+   version strings all shattered — which is how a summary came to report
+   2 billion instead of 4.2 billion. */
 function splitSentences(text) {
-  return (text || '')
-    .replace(/\s+/g, ' ')
-    .match(/[^.!?]+[.!?]?/g)
-    ?.map((sentence) => sentence.trim())
-    .filter(Boolean) || [];
-}
-
-function titleCase(word) {
-  return word ? word.charAt(0).toUpperCase() + word.slice(1) : word;
-}
-
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return sentenceTexts(text);
 }
 
 function replaceWholeWord(text, original, suggestion) {
@@ -64,26 +65,6 @@ function replaceWholeWord(text, original, suggestion) {
     if (match[0] === match[0].toUpperCase()) return titleCase(suggestion);
     return suggestion;
   });
-}
-
-function cleanupSpacing(text) {
-  return text
-    .replace(/\s+([,.!?;:])/g, '$1')
-    .replace(/([,.!?;:])(?=[^\s])/g, '$1 ')
-    .replace(/,\s*,+/g, ', ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
-
-function sentenceCaseText(text) {
-  return (text || '')
-    .replace(/(^|[.!?]\s+|\n+)([a-z])/g, (match, prefix, letter) => `${prefix}${letter.toUpperCase()}`)
-    .replace(/\bi\b/g, 'I');
-}
-
-function ensureTrailingPunctuation(text) {
-  if (!text) return '';
-  return /[.!?]$/.test(text) ? text : `${text}.`;
 }
 
 function applyPhraseReplacements(text, replacements) {
@@ -189,56 +170,9 @@ function applyCoreCorrections(text) {
   return ensureTrailingPunctuation(result);
 }
 
-function findVerbProblem(text) {
-  const source = normalizeWhitespace(text);
-  if (!source) return null;
-
-  const patterns = [
-    {
-      regex: /\b(want|need)\s+leave\b/i,
-      replacement: (match, verb) => `${verb} to leave`,
-      suggestion: 'to leave',
-      explanation: 'This verb usually needs “to” before the next verb.'
-    },
-    {
-      regex: /\b(want|need)\s+go\b/i,
-      replacement: (match, verb) => `${verb} to go`,
-      suggestion: 'to go',
-      explanation: 'This verb usually needs “to” before the next verb.'
-    },
-    {
-      regex: /\b(want|need)\s+take\s+leave\b/i,
-      replacement: (match, verb) => `${verb} to take leave`,
-      suggestion: 'to take leave',
-      explanation: 'This phrase reads more naturally with “to take leave.”'
-    },
-    {
-      regex: /\b(want|need)\s+holiday\b/i,
-      replacement: (match, verb) => `${verb} a holiday`,
-      suggestion: 'a holiday',
-      explanation: 'This noun phrase usually needs an article.'
-    }
-  ];
-
-  for (const pattern of patterns) {
-    const match = source.match(pattern.regex);
-    if (!match) continue;
-
-    const correctedSentence = ensureTrailingPunctuation(
-      cleanupSpacing(sentenceCaseText(source.replace(pattern.regex, pattern.replacement)))
-    );
-
-    return {
-      original: match[0],
-      suggestion: pattern.suggestion,
-      replacement: correctedSentence,
-      rule: 'Verb problem',
-      explanation: pattern.explanation
-    };
-  }
-
-  return null;
-}
+/* findVerbProblem is gone with checkGrammar; it hard-coded four patterns
+   about wanting leave or a holiday. COMMON_REPLACEMENTS below survives only
+   because the paraphrase rewriter still leans on it, and dies with that. */
 
 const COMMON_REPLACEMENTS = [
   ['teh', 'the', 'Spelling', 'A common typo.'],
@@ -256,104 +190,11 @@ const COMMON_REPLACEMENTS = [
   ['im', "I'm", 'Capitalization', 'Capitalize the pronoun and add the apostrophe.']
 ];
 
-function checkGrammar(text) {
-  const errors = [];
-  const rawText = text || '';
-  const trimmed = rawText.trim();
-  const correctedText = applyStandardRewrite(rawText);
-
-  if (!trimmed) return [];
-
-  const verbProblem = findVerbProblem(rawText);
-  if (verbProblem) {
-    errors.push(verbProblem);
-  }
-
-  const repeatedWords = rawText.match(/\b(\w+)\s+\1\b/gi) || [];
-  repeatedWords.forEach((match) => {
-    const word = match.split(/\s+/)[0];
-    errors.push({
-      original: match,
-      suggestion: word,
-      rule: 'Repeated word',
-      explanation: 'The same word appears twice in a row.'
-    });
-  });
-
-  if (/\s{2,}/.test(rawText)) {
-    errors.push({
-      original: 'Multiple spaces',
-      suggestion: 'Use a single space',
-      rule: 'Spacing',
-      explanation: 'Extra spaces make text harder to read and can break formatting.'
-    });
-  }
-
-  const sentences = splitSentences(rawText);
-  sentences.forEach((sentence) => {
-    const firstLetter = sentence.match(/[A-Za-z]/);
-    if (firstLetter) {
-      const ch = firstLetter[0];
-      if (ch === ch.toLowerCase()) {
-        errors.push({
-          original: sentence.slice(0, Math.min(sentence.length, 40)),
-          suggestion: titleCase(sentence),
-          rule: 'Capitalization',
-          explanation: 'Sentences should usually begin with a capital letter.'
-        });
-      }
-    }
-
-    if (!/[.!?]["')\]]?$/.test(sentence) && sentence.split(' ').length > 3) {
-      errors.push({
-        original: sentence.slice(0, Math.min(sentence.length, 40)),
-        suggestion: `${sentence}.`,
-        rule: 'Punctuation',
-        explanation: 'This sentence appears to be missing end punctuation.'
-      });
-    }
-  });
-
-  if (/\bi\b/.test(rawText)) {
-    errors.push({
-      original: 'i',
-      suggestion: 'I',
-      rule: 'Capitalization',
-      explanation: 'The pronoun “I” should always be capitalized.'
-    });
-  }
-
-  COMMON_REPLACEMENTS.forEach(([original, suggestion, rule, explanation]) => {
-    const regex = new RegExp(`\\b${escapeRegExp(original)}\\b`, 'i');
-    if (regex.test(rawText)) {
-      errors.push({ original, suggestion, rule, explanation });
-    }
-  });
-
-  if (/\b(very|really|actually|basically|literally)\b/gi.test(rawText)) {
-    errors.push({
-      original: 'Filler words',
-      suggestion: 'Trim unnecessary intensifiers',
-      rule: 'Clarity',
-      explanation: 'Words like “very” or “actually” can weaken concise writing.'
-    });
-  }
-
-  if (
-    correctedText &&
-    cleanupSpacing(rawText) !== cleanupSpacing(correctedText) &&
-    !verbProblem
-  ) {
-    errors.unshift({
-      original: rawText,
-      suggestion: correctedText,
-      rule: 'Suggested correction',
-      explanation: 'A stronger local correction was generated for the full sentence.'
-    });
-  }
-
-  return errors.slice(0, 12);
-}
+/* checkGrammar is gone. It was a 13-entry typo table matched with \bword\b,
+   so it could not see a single inflected form — "recieved", "seperated" and
+   "occuring" all passed clean even though their stems were in the table.
+   Grammar and spelling now come from Harper (see lib/engine-client.js),
+   which returns real spans and replacement lists. */
 
 function applyStandardRewrite(text) {
   let result = applyCoreCorrections(text);
@@ -476,385 +317,45 @@ function applyCreativeRewrite(text) {
     .join(' ');
 }
 
+const REWRITE_MODES = {
+  formal: applyFormalRewrite,
+  casual: applyCasualRewrite,
+  shorten: applyShortenRewrite,
+  expand: applyExpandRewrite,
+  creative: applyCreativeRewrite,
+  standard: applyStandardRewrite
+};
+
+/* Every rewrite runs per paragraph and the blank lines are restored
+   afterwards. Previously the pipeline began with normalizeWhitespace,
+   so a multi-paragraph draft came back as a single block — and the
+   checker then reported a "Multiple spaces" issue on the text it had
+   just flattened. */
 function paraphraseText(text, mode = 'standard') {
   const source = text || '';
   if (!source.trim()) return '';
 
-  switch (mode) {
-    case 'formal':
-      return applyFormalRewrite(source);
-    case 'casual':
-      return applyCasualRewrite(source);
-    case 'shorten':
-      return applyShortenRewrite(source);
-    case 'expand':
-      return applyExpandRewrite(source);
-    case 'creative':
-      return applyCreativeRewrite(source);
-    case 'standard':
-    default:
-      return applyStandardRewrite(source);
-  }
-}
-
-const SIMPLE_WORD_MAP = {
-  utilize: 'use',
-  commence: 'start',
-  terminate: 'end',
-  assistance: 'help',
-  approximately: 'about',
-  demonstrate: 'show',
-  facilitate: 'help',
-  purchase: 'buy',
-  obtain: 'get',
-  numerous: 'many',
-  regarding: 'about',
-  sufficient: 'enough',
-  additional: 'more',
-  therefore: 'so',
-  however: 'but',
-  moreover: 'and',
-  inquire: 'ask',
-  reside: 'live',
-  modification: 'change',
-  objective: 'goal',
-  requirement: 'need',
-  verify: 'check',
-  initiate: 'start',
-  prior: 'before',
-  subsequent: 'later',
-  indicate: 'show'
-};
-
-function normalizeForComparison(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function getWords(text) {
-  return normalizeWhitespace(text)
-    .match(/\b[\w']+\b/g) || [];
-}
-
-function getBigrams(text) {
-  const words = getWords(normalizeForComparison(text));
-  if (words.length < 2) return new Set(words);
-
-  const bigrams = new Set();
-  for (let i = 0; i < words.length - 1; i += 1) {
-    bigrams.add(`${words[i]} ${words[i + 1]}`);
-  }
-  return bigrams;
-}
-
-function jaccardSimilarity(setA, setB) {
-  if (!setA.size && !setB.size) return 1;
-  const intersection = [...setA].filter((item) => setB.has(item)).length;
-  const union = new Set([...setA, ...setB]).size;
-  return union ? intersection / union : 0;
-}
-
-function replaceSimpleWords(text) {
-  let result = text;
-  Object.entries(SIMPLE_WORD_MAP).forEach(([complex, simple]) => {
-    result = replaceWholeWord(result, complex, simple);
-  });
-  return result;
-}
-
-function humanizeConnectors(text) {
-  return applyPhraseReplacements(text, [
-    [/\bit is important to note that\b/gi, ''],
-    [/\bit should be noted that\b/gi, ''],
-    [/\bin order to\b/gi, 'to'],
-    [/\bdue to the fact that\b/gi, 'because'],
-    [/\bat this point in time\b/gi, 'now'],
-    [/\bas a result\b/gi, 'so'],
-    [/\bin addition\b/gi, 'and'],
-    [/\bfor the purpose of\b/gi, 'for'],
-    [/\bwith regard to\b/gi, 'about']
-  ]);
-}
-
-function depassivizeSentence(text) {
-  let result = text;
-  result = result.replace(
-    /\b(.+?)\s+was\s+([a-z]+ed)\s+by\s+(.+?)\b/i,
-    (match, subject, verb, actor) => `${titleCase(cleanupSpacing(actor))} ${verb} ${cleanupSpacing(subject).toLowerCase()}`
-  );
-  result = result.replace(
-    /\b(.+?)\s+were\s+([a-z]+ed)\s+by\s+(.+?)\b/i,
-    (match, subject, verb, actor) => `${titleCase(cleanupSpacing(actor))} ${verb} ${cleanupSpacing(subject).toLowerCase()}`
-  );
-  return result;
-}
-
-function splitLongSentence(text) {
-  const words = getWords(text);
-  if (words.length <= 20) return [cleanupSpacing(text)];
-
-  const preferredSplit = text.search(/\s(?:and|but|so)\s/i);
-  if (preferredSplit > 25 && preferredSplit < text.length - 20) {
-    const connectorMatch = text.slice(preferredSplit).match(/\s(and|but|so)\s/i);
-    if (connectorMatch) {
-      const connector = connectorMatch[1].toLowerCase();
-      const [left, right] = [
-        text.slice(0, preferredSplit),
-        text.slice(preferredSplit + connectorMatch[0].length)
-      ];
-      return [
-        ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(left))),
-        ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(`${connector} ${right}`)))
-      ];
-    }
-  }
-
-  const midpoint = Math.floor(words.length / 2);
-  const splitToken = words[midpoint];
-  const splitIndex = text.toLowerCase().indexOf(splitToken.toLowerCase(), Math.floor(text.length / 3));
-  if (splitIndex > 20) {
-    const left = text.slice(0, splitIndex);
-    const right = text.slice(splitIndex);
-    return [
-      ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(left))),
-      ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(`So ${right}`)))
-    ];
-  }
-
-  return [ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(text)))];
-}
-
-function humanizeSentence(sentence) {
-  let result = normalizeWhitespace(sentence || '');
-  if (!result) return '';
-
-  result = replaceSimpleWords(result);
-  result = humanizeConnectors(result);
-  result = depassivizeSentence(result);
-  result = applyPhraseReplacements(result, [
-    [/\bplease be advised that\b/gi, ''],
-    [/\bkindly\b/gi, 'please'],
-    [/\bdo not hesitate to\b/gi, 'please'],
-    [/\bwe would like to\b/gi, 'we want to']
-  ]);
-
-  const parts = splitLongSentence(result)
-    .map((part) => cleanupSpacing(part))
-    .filter(Boolean)
-    .map((part) => ensureTrailingPunctuation(sentenceCaseText(part)));
-
-  return cleanupSpacing(parts.join(' '));
-}
-
-function detectRepeatedSentences(sentences) {
-  const repeated = [];
-  const duplicateIndices = new Set();
-
-  for (let i = 0; i < sentences.length; i += 1) {
-    for (let j = i + 1; j < sentences.length; j += 1) {
-      const similarity = jaccardSimilarity(getBigrams(sentences[i]), getBigrams(sentences[j]));
-      if (similarity > 0.8) {
-        duplicateIndices.add(j);
-        repeated.push({
-          text: cleanupSpacing(sentences[i].replace(/[.!?]+$/, '')),
-          similarity: Number(similarity.toFixed(2)),
-          indexA: i,
-          indexB: j
-        });
-      }
-    }
-  }
-
-  return { repeated, duplicateIndices };
-}
-
-function analyzeAndHumanizeText(text) {
-  const source = String(text || '').trim();
-  const sentences = splitSentences(source).map((sentence) => cleanupSpacing(sentence)).filter(Boolean);
-
-  if (sentences.length === 0) {
-    return {
-      uniqueness_score: 1,
-      repetition_score: 0,
-      status: 'unique',
-      repeated_sentences: [],
-      humanized_text: ''
-    };
-  }
-
-  const { repeated, duplicateIndices } = detectRepeatedSentences(sentences);
-  const repeatedCount = repeated.length;
-  const repetitionScore = Number((repeatedCount / Math.max(1, sentences.length - 1)).toFixed(2));
-  const uniquenessScore = Number((1 - repetitionScore).toFixed(2));
-  const status = uniquenessScore < 0.4 ? 'rejected' : uniquenessScore <= 0.7 ? 'flagged' : 'unique';
-
-  const humanizedSentences = sentences
-    .filter((sentence, index) => !duplicateIndices.has(index))
-    .map((sentence) => humanizeSentence(sentence))
-    .filter(Boolean);
-
-  return {
-    uniqueness_score: uniquenessScore,
-    repetition_score: repetitionScore,
-    status,
-    repeated_sentences: repeated,
-    humanized_text: cleanupSpacing(humanizedSentences.join(' '))
-  };
-}
-
-function truncateSummarySentence(text, maxLength = 140) {
-  const clean = cleanupSpacing(text || '');
-  if (clean.length <= maxLength) return clean;
-  const shortened = clean.slice(0, maxLength);
-  const cutoff = shortened.lastIndexOf(' ');
-  return `${(cutoff > 60 ? shortened.slice(0, cutoff) : shortened).trim()}...`;
-}
-
-function compressSummarySentence(sentence) {
-  let result = cleanupSpacing(sentence || '');
-  if (!result) return '';
-
-  result = result
-    .replace(/^\s*(per|according to)\s+[^,]+,\s*/i, '')
-    .replace(/^\s*sources?\s+(said|added|claimed|reported)\s+that\s*/i, '')
-    .replace(/\b(a report|reports?)\s+(has\s+)?(claimed|said|reported)\s+that\s*/i, '')
-    .replace(/\bwhich\s+(quotes?|cites?)\s+[^,]+,\s*/i, '')
-    .replace(/\bsource(s)?\s+(said|added)\s+that\s*/gi, '')
-    .replace(/\b(it|this)\s+(reportedly|reportedly)\b/gi, '$1')
-    .replace(/\bpotential\b/gi, 'possible')
-    .replace(/\bcould lead to\b/gi, 'may bring')
-    .replace(/\bare taking part in\b/gi, 'are in')
-    .replace(/\bwithin which\b/gi, 'when')
-    .replace(/\bhas claimed that\b/gi, '')
-    .replace(/\bhas said that\b/gi, '');
-
-  result = sentenceCaseText(cleanupSpacing(result));
-  return truncateSummarySentence(ensureTrailingPunctuation(result));
+  const transform = REWRITE_MODES[mode] || REWRITE_MODES.standard;
+  return mapBlocks(source, transform);
 }
 
 
-function normalizeSummaryLines(content) {
-  const seen = new Set();
-  return String(content || '')
-    .split(/\n+/)
-    .map((line) => normalizeWhitespace(line))
-    .filter(Boolean)
-    .filter((line) => line.length >= 25)
-    .filter((line) => !/^(advertisement|sponsored|share|copy link|sign in|log in|subscribe|follow us)$/i.test(line))
-    .filter((line) => {
-      const normalized = line.toLowerCase();
-      if (seen.has(normalized)) return false;
-      seen.add(normalized);
-      return true;
-    });
-}
+/* The "humanize" block is gone: SIMPLE_WORD_MAP, humanizeConnectors,
+   depassivizeSentence, splitLongSentence, humanizeSentence, the bigram
+   repetition detector, and analyzeAndHumanizeText. None of it was reachable
+   from the UI, and depassivizeSentence actively produced word salad —
+   "The contract was signed by both parties before the deadline." came back
+   as "Both signed the contract parties before the deadline." Rewriting
+   voice needs a parser; a regex cannot do it safely. */
 
-function isLikelyHeading(line) {
-  if (!line) return false;
-  if (line.length > 80) return false;
-  if (/[.!?]$/.test(line)) return false;
-  const words = line.split(/\s+/).filter(Boolean);
-  if (words.length < 1 || words.length > 8) return false;
-  return /^(?:[A-Z][\w&/-]*\s*)+$/.test(line) || /^[A-Z][A-Za-z\s&/-]+$/.test(line);
-}
+/* The extractive summarizer now lives in lib/summarize.js. The version
+   that was here truncated sentences mid-way, which can invert a claim,
+   and its sentence scorer awarded bonus points for sports vocabulary. */
 
-function scoreSummarySentence(sentence, index, titleWords) {
-  const lower = sentence.toLowerCase();
-  const words = lower.match(/\b[a-z]{3,}\b/g) || [];
-  const uniqueWords = new Set(words);
-  let score = uniqueWords.size;
-
-  if (index < 3) score += 4;
-  if (sentence.length >= 55 && sentence.length <= 180) score += 3;
-  if (/\b(injury|availability|tactics|matchups|probable|record|confirmed|return|coach|captain|season|form)\b/i.test(sentence)) score += 3;
-
-  if (titleWords?.size) {
-    const overlap = [...uniqueWords].filter((word) => titleWords.has(word)).length;
-    score += overlap * 2;
-  }
-
-  if (/[:|]/.test(sentence)) score += 2;
-  if (sentence.length > 220) score -= 3;
-  return score;
-}
-
-function buildBriefSummary(content) {
-  const lines = normalizeSummaryLines(content);
-  if (!lines.length) return 'No readable content found.';
-
-  const title = lines.find(isLikelyHeading) || '';
-  const bodyLines = title ? lines.filter((line, index) => index !== lines.indexOf(title)) : lines;
-  const text = bodyLines.join(' ');
-
-  const sentences = splitSentences(text)
-    .map((sentence) => cleanupSpacing(sentence))
-    .filter((sentence) => sentence.split(' ').length >= 7)
-    .filter((sentence) => sentence.length <= 240);
-
-  if (!sentences.length) {
-    return truncateSummarySentence(text, 180);
-  }
-
-  const titleWords = new Set(
-    (title.toLowerCase().match(/\b[a-z]{3,}\b/g) || []).filter((word) => !['the', 'and', 'for'].includes(word))
-  );
-
-  const ranked = sentences
-    .map((sentence, index) => ({
-      sentence,
-      index,
-      score: scoreSummarySentence(sentence, index, titleWords)
-    }))
-    .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, 3)
-    .sort((a, b) => a.index - b.index);
-
-  const parts = ranked
-    .map((item) => truncateSummarySentence(compressSummarySentence(item.sentence), 110))
-    .filter(Boolean);
-
-  if (!parts.length) {
-    return truncateSummarySentence(text, 180);
-  }
-
-  const shortTitle = title ? truncateSummarySentence(title, 55) : '';
-  const introCore = parts[0].replace(/[.!?]+$/, '');
-  const intro = shortTitle
-    ? `${shortTitle}: ${introCore}.`
-    : `In short: ${introCore}.`;
-  const bullets = parts
-    .slice(1, 3)
-    .map((part) => part.replace(/^[•\-\s]+/, ''))
-    .map((part) => `• ${part}`);
-
-  return [intro, ...bullets].join('\n');
-}
-
-function getWritingScore(text) {
-  const source = text || '';
-  const words = source.match(/\b[\w']+\b/g) || [];
-  const sentences = splitSentences(source);
-  const grammarIssues = checkGrammar(source).length;
-  const avgSentenceLength = sentences.length ? words.length / sentences.length : words.length;
-  const longSentencePenalty = avgSentenceLength > 24 ? 12 : avgSentenceLength > 18 ? 6 : 0;
-  const shortSentenceBonus = avgSentenceLength >= 8 && avgSentenceLength <= 18 ? 6 : 0;
-  const fillerPenalty = (source.match(/\b(very|really|actually|basically|just)\b/gi) || []).length * 2;
-
-  const grammar = Math.max(45, 100 - grammarIssues * 9);
-  const clarity = Math.max(40, 94 - longSentencePenalty - fillerPenalty + shortSentenceBonus);
-  const engagement = Math.max(45, Math.min(95, 68 + (/[!?]/.test(source) ? 4 : 0) + (/\byou\b/i.test(source) ? 6 : 0) + (/\b(imagine|build|create|improve|discover)\b/i.test(source) ? 8 : 0)));
-  const overall = Math.round((grammar * 0.4) + (clarity * 0.35) + (engagement * 0.25));
-
-  let feedback = 'Strong baseline writing.';
-  if (grammarIssues >= 3) feedback = 'Clean up grammar and spelling issues first for a stronger draft.';
-  else if (clarity < 70) feedback = 'Shorter sentences and fewer filler words would improve clarity.';
-  else if (engagement < 70) feedback = 'Stronger verbs and more direct phrasing would make this more engaging.';
-
-  return { overall, grammar, clarity, engagement, feedback };
-}
+/* getWritingScore is gone. It graded text by counting how many issues the
+   checker found, so the weaker the checker, the higher the grade — badly
+   broken sentences scored 100/100 for grammar. A score is only honest once
+   there is an engine behind it that can justify the number. */
 
 function parseDateKeyword(lower) {
   const now = new Date();
@@ -1188,21 +689,24 @@ function broadcastMessage(message) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  /* chrome.runtime.sendMessage reaches every extension context, so messages
+     addressed to the offscreen engine host arrive here too. Ignore them, or
+     this listener answers first and the real host never gets a look in. */
+  if (request?.target === 'offscreen') return false;
+
   const handler = async () => {
     try {
       switch (request.action) {
         case 'checkGrammar':
-          return checkGrammar(request.text);
+          return await lintText(request.text);
+        case 'engineStatus':
+          return { ready: await engineReady() };
         case 'fixGrammar':
-          return applyStandardRewrite(request.text);
+          return mapBlocks(request.text || '', applyStandardRewrite);
         case 'paraphrase':
           return paraphraseText(request.text, request.mode);
-        case 'analyzeHumanizeText':
-          return analyzeAndHumanizeText(request.text);
         case 'summarize':
           return buildBriefSummary(request.content);
-        case 'writingScore':
-          return getWritingScore(request.text);
         case 'parseTask':
           return parseNaturalLanguageTask(request.text);
         case 'createTask': {
