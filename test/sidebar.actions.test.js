@@ -35,14 +35,14 @@ test('the highlight is applied from script, following the last action', () => {
   );
 });
 
-test('all three actions are disabled while one is working', () => {
+test('both actions are disabled while one is working', () => {
   assert.match(JS, /function setActionsBusy/);
   assert.match(JS, /btn\.disabled = busy/, 'buttons must be disabled during work');
   assert.match(JS, /aria-busy/, 'the working button should expose aria-busy');
 });
 
 test('every write action routes through the shared runner', () => {
-  for (const button of ['btnParaphrase', 'btnGrammar', 'btnSummarize']) {
+  for (const button of ['btnGrammar', 'btnSummarize']) {
     assert.match(
       JS,
       new RegExp(`runAction\\(${button}`),
@@ -54,7 +54,7 @@ test('every write action routes through the shared runner', () => {
 test('the spinner is cleared in a finally block', () => {
   // hideLoading used to sit after the try/catch, so an unexpected throw left
   // the spinner running forever.
-  const runner = JS.slice(JS.indexOf('async function runAction'), JS.indexOf('// ── Paraphrase ──'));
+  const runner = JS.slice(JS.indexOf('async function runAction'), JS.indexOf('// ── Grammar ──'));
   assert.match(runner, /finally\s*\{[\s\S]*hideLoading[\s\S]*setActionsBusy\(false\)/);
 });
 
@@ -75,6 +75,6 @@ test('summarize is allowed to run with an empty box, meaning "this page"', () =>
 });
 
 test('failures surface in the result area rather than being swallowed', () => {
-  const runner = JS.slice(JS.indexOf('async function runAction'), JS.indexOf('// ── Paraphrase ──'));
+  const runner = JS.slice(JS.indexOf('async function runAction'), JS.indexOf('// ── Grammar ──'));
   assert.match(runner, /catch \(err\)[\s\S]*showResult\('Error'/);
 });

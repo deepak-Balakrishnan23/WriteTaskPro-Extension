@@ -1,6 +1,6 @@
 {
   "name": "writetask-pro",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Local writing assistant, grammar helper, and task manager with no API keys or cloud processing.",
   "type": "module",

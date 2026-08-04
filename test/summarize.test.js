@@ -158,7 +158,8 @@ test('a long sentence is still preserved whole, not clipped', () => {
 test('a single sentence gets an actionable message, not a dead end', () => {
   const summary = buildBriefSummary(LONG_A);
   assert.doesNotMatch(summary, /No summarizable sentences found/);
-  assert.match(summary, /Improve/, `message should point at the right action:\n${summary}`);
+  assert.match(summary, /at least two sentences/, `message should say what to do instead:\n${summary}`);
+  assert.doesNotMatch(summary, /Improve/, 'Improve was removed; do not point users at it');
 });
 
 test('two sentences are enough to summarize', () => {

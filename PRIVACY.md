@@ -1,14 +1,14 @@
 # Privacy Policy
 
-WriteTask Pro processes writing assistance and reminder data locally in the browser.
+Tasve processes writing assistance and reminder data locally in the browser.
 
 ## What data is handled
-- Text you choose to rewrite, summarize, or check for grammar
+- Text you choose to summarize or check for grammar
 - Reminder/task items you create in the extension
 - Basic theme preference saved for the UI
 
 ## How data is used
-- Writing text is processed locally to provide rewrite, summary, and grammar features
+- Writing text is processed locally to provide summary and grammar features
 - Tasks and settings are stored in `chrome.storage.local` so they remain available on your device
 - The extension does not send your text, tasks, or settings to any external server
 

@@ -1,5 +1,5 @@
 /* =========================================================
-   WriteTask Pro — Sidebar JS
+   Tasve — Sidebar JS
    ========================================================= */
 
 (() => {
@@ -12,8 +12,8 @@
   const btnSettings = $('#btn-settings'), btnClose = $('#btn-close');
   const tabs = $$('.tab');
   const panels = { write: $('#panel-write'), tasks: $('#panel-tasks'), settings: $('#panel-settings') };
-  const writeInput = $('#write-input'), modeBtns = $$('.mode-btn');
-  const btnParaphrase = $('#btn-paraphrase'), btnGrammar = $('#btn-grammar'), btnSummarize = $('#btn-summarize');
+  const writeInput = $('#write-input');
+  const btnGrammar = $('#btn-grammar'), btnSummarize = $('#btn-summarize');
   const writeResult = $('#write-result'), resultContent = $('#result-content'), resultSubtitle = $('#result-subtitle'), writeLoading = $('#write-loading');
   const btnCopyResult = $('#btn-copy-result');
   const taskInput = $('#task-input'), btnAddTask = $('#btn-add-task'), taskLoading = $('#task-loading');
@@ -24,11 +24,14 @@
   const timeRow = $('#time-row');
   const timeBadges = $('#time-badges');
   const taskList = $('#task-list');
-  const btnCloseSettings = $('#btn-close-settings'), settingTheme = $('#setting-theme');
+  const btnCloseSettings = $('#btn-close-settings'), btnBackSettings = $('#btn-back-settings'), settingTheme = $('#setting-theme');
+  const settingFullscreen = $('#setting-fullscreen'), settingSound = $('#setting-sound');
+  const settingVolume = $('#setting-volume'), settingVolumeOut = $('#setting-volume-out');
+  const settingHaptics = $('#setting-haptics'), settingAnimations = $('#setting-animations');
+  const settingDuration = $('#setting-duration');
   const btnSaveSettings = $('#btn-save-settings');
 
   // ── State ──
-  let selectedMode = 'standard';
   let selectedPriority = 'P2';
   let selectedTaskKind = 'task';
   let selectedDuration = 15;
@@ -61,14 +64,41 @@
     window.parent.postMessage({ source: 'wtp-sidebar', action: 'sidebarReady' }, '*');
   }
 
+  /* Defaults and validation live in lib/notification-settings.js, which the
+     background worker and content script also read, so the three cannot
+     drift. Imported dynamically because this file is a classic script. */
+  async function getNotificationDefaults(raw) {
+    const module = await import('./lib/notification-settings.js');
+    return module.normalizeNotificationSettings(raw);
+  }
+
   async function loadSettings() {
     try {
       const result = await chrome.storage.local.get(['wtp_settings']);
       const s = result.wtp_settings || {};
       if (s.theme) settingTheme.value = s.theme;
       applyTheme(s.theme || 'system');
+
+      const notifications = await getNotificationDefaults(s);
+      settingFullscreen.checked = notifications.fullscreenReminders;
+      settingSound.checked = notifications.sound;
+      settingVolume.value = String(Math.round(notifications.soundVolume * 100));
+      settingHaptics.checked = notifications.haptics;
+      settingAnimations.checked = notifications.animations;
+      settingDuration.value = String(notifications.reminderDurationMs);
+      syncVolumeControl();
     } catch { }
   }
+
+  /* The slider is meaningless while sound is off, so it says so rather than
+     letting the user set a volume that does nothing. */
+  function syncVolumeControl() {
+    settingVolume.disabled = !settingSound.checked;
+    settingVolumeOut.textContent = `${settingVolume.value}%`;
+  }
+
+  settingSound.addEventListener('change', syncVolumeControl);
+  settingVolume.addEventListener('input', syncVolumeControl);
 
   // ══════════════════════════════════════
   // BUG-01 FIX: Tab navigation with previousTab tracking
@@ -95,6 +125,10 @@
     closeSettingsPanel();
   });
 
+  btnBackSettings.addEventListener('click', () => {
+    closeSettingsPanel();
+  });
+
   function closeSettingsPanel() {
     panels.settings.classList.remove('active');
     document.body.classList.remove('settings-open');
@@ -107,7 +141,13 @@
 
   btnSaveSettings.addEventListener('click', async () => {
     const settings = {
-      theme: settingTheme.value
+      theme: settingTheme.value,
+      fullscreenReminders: settingFullscreen.checked,
+      sound: settingSound.checked,
+      soundVolume: Number(settingVolume.value) / 100,
+      haptics: settingHaptics.checked,
+      animations: settingAnimations.checked,
+      reminderDurationMs: Number(settingDuration.value)
     };
     await chrome.storage.local.set({ wtp_settings: settings });
     applyTheme(settings.theme);
@@ -116,15 +156,6 @@
 
   btnClose.addEventListener('click', () => {
     window.parent.postMessage({ source: 'wtp-sidebar', action: 'closeSidebar' }, '*');
-  });
-
-  // ── Paraphrase Mode ──
-  modeBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-      modeBtns.forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      selectedMode = btn.dataset.mode;
-    });
   });
 
   priorityBtns.forEach((btn) => {
@@ -247,11 +278,11 @@
      The "primary" class used to be hardcoded on Improve in the HTML,
      so Improve looked permanently selected and clicking Summarize
      produced no visible change at all — it ran, but nothing said so.
-     The highlight now follows whichever action was last used, and all
-     three are disabled while one is working, which also stops a second
-     click racing the first.
+     The highlight now follows whichever action was last used, and both
+     are disabled while one is working, which also stops a second click
+     racing the first.
      ───────────────────────────────────────────────────────────── */
-  const actionBtns = [btnParaphrase, btnGrammar, btnSummarize];
+  const actionBtns = [btnGrammar, btnSummarize];
 
   function setActionsBusy(busy, active = null) {
     actionBtns.forEach((btn) => {
@@ -282,13 +313,6 @@
       setActionsBusy(false);
     }
   }
-
-  // ── Paraphrase ──
-  btnParaphrase.addEventListener('click', () => runAction(btnParaphrase, async () => {
-    const outputText = await sendMessage({ action: 'paraphrase', text: getWriteText(), mode: selectedMode });
-    lastResultText = outputText;
-    showResult('Improved text', `<div style="white-space:pre-wrap;">${escapeHTML(outputText)}</div>`);
-  }));
 
   // ── Grammar ──
   const SEVERITY_LABELS = { spelling: 'Spelling', grammar: 'Grammar', style: 'Style' };
@@ -515,9 +539,10 @@
     const leading = task.kind === 'task'
       ? `<button class="task-check ${task.completed ? 'checked' : ''}" data-priority="${task.priority || 'P4'}" data-id="${task.id}" title="Complete task"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button>`
       : `<div class="task-kind-icon ${escapeHTML(task.kind || 'task')}">${getTaskIcon(task.kind)}</div>`;
-    const actions = task.kind === 'task'
-      ? `<div class="task-actions"><button class="task-action-btn" data-action="edit" data-id="${task.id}" title="Edit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button><button class="task-action-btn" data-action="delete" data-id="${task.id}" title="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></div>`
+    const editAction = task.kind === 'task'
+      ? `<button class="task-action-btn" data-action="edit" data-id="${task.id}" title="Edit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>`
       : '';
+    const actions = `<div class="task-actions">${editAction}<button class="task-action-btn" data-action="delete" data-id="${task.id}" title="Delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></div>`;
     const editingClass = editingTaskId === task.id ? ' editing' : '';
     const readyClass = task.attentionNeeded ? ' ready' : '';
     const focusedClass = focusedTaskId === task.id ? ' focused' : '';
@@ -596,19 +621,10 @@
           }
         }
         break;
-      case 'paraphrase':
-        writeInput.value = data.text;
-        switchToPanel('write');
-        btnParaphrase.click();
-        break;
       case 'grammar':
         writeInput.value = data.text;
         switchToPanel('write');
         btnGrammar.click();
-        break;
-      case 'tone':
-        writeInput.value = data.text;
-        switchToPanel('write');
         break;
       case 'addTask':
         taskInput.value = data.text;

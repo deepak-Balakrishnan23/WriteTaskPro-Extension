@@ -1,5 +1,5 @@
 /* =========================================================
-   WriteTask Pro — Content Script
+   Tasve — Content Script
 
    Runs on every page: the floating button, the selection toolbar,
    the inline grammar card, and the sidebar iframe host.
@@ -20,12 +20,13 @@
   let sidebarFrame = null;
   let sidebarReady = false;       // BUG-07 FIX
   let pendingMessages = [];       // BUG-07 FIX
-  let floatingBtn = null;
   let selectionToolbar = null;
   let grammarCard = null;
   let grammarSelectionRange = null;
   let grammarEditableTarget = null;
   let typingGrammarTimer = null;
+  let reminderHost = null;          // lazily built on the first reminder
+  let reminderHostPromise = null;
 
   function isRuntimeAvailable() {
     try {
@@ -51,8 +52,8 @@
      unnoticed long enough to ship — the inline grammar card threw on
      every single invocation and nothing ever surfaced it. */
   function logDebug(message, err) {
-    if (err) console.debug('[WriteTask Pro]', message, err);
-    else console.debug('[WriteTask Pro]', message);
+    if (err) console.debug('[Tasve]', message, err);
+    else console.debug('[Tasve]', message);
   }
 
   function escapeHTML(str) {
@@ -87,7 +88,7 @@
   function sendRuntimeMessage(message) {
     return new Promise((resolve, reject) => {
       if (!isRuntimeAvailable()) {
-        reject(new Error('WriteTask Pro was reloaded. Refresh the page and try again.'));
+        reject(new Error('Tasve was reloaded. Refresh the page and try again.'));
         return;
       }
 
@@ -133,33 +134,16 @@
     pendingMessages.splice(0).forEach(postToSidebar);
   }
 
-  // ── Floating Action Button ──
-  /* A real <button>, not a <div> with a click handler — the div was not
-     focusable, exposed no role, and had no accessible name beyond a title
-     attribute, so keyboard and screen reader users could not open the
-     sidebar at all. */
-  function createFloatingButton() {
-    floatingBtn = document.createElement('button');
-    floatingBtn.id = 'wtp-fab';
-    floatingBtn.type = 'button';
-    floatingBtn.setAttribute('aria-label', 'Open WriteTask Pro');
-    floatingBtn.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
-    floatingBtn.title = 'WriteTask Pro';
-    floatingBtn.addEventListener('click', toggleSidebar);
-    document.body.appendChild(floatingBtn);
-  }
-
   async function refreshReminderIndicator() {
-    if (!floatingBtn) return;
     try {
       const tasks = await sendRuntimeMessage({ action: 'getTasks' });
       const readyCount = (tasks || []).filter((task) => !task.completed && task.attentionNeeded).length;
-      floatingBtn.classList.toggle('wtp-has-alert', readyCount > 0);
-      floatingBtn.dataset.reminderCount = readyCount > 0 ? String(Math.min(readyCount, 9)) : '';
+      /* The pill outlives the overlay, so it is storage that decides when it
+         goes: cleared here once nothing is pending, whichever tab or window
+         pressed Done. */
+      if (readyCount === 0) reminderHost?.clear();
     } catch (err) {
       logDebug('could not refresh reminder indicator', err);
-      floatingBtn.classList.remove('wtp-has-alert');
-      floatingBtn.dataset.reminderCount = '';
     }
   }
 
@@ -178,6 +162,23 @@
 
     wrapper.appendChild(sidebarFrame);
     document.body.appendChild(wrapper);
+
+    /* Top layer, not just a high z-index: page ads and sticky footers were
+       painting over the sidebar because a max z-index still loses to any
+       element the page puts in the top layer, and loses to nothing at all
+       if the page traps the sidebar's ancestor in its own stacking context.
+       "manual" so nothing light-dismisses it, and it stays shown for the
+       tab's lifetime — open/close is still the .wtp-open slide, which needs
+       the element to keep rendering while it animates out. */
+    try {
+      if (typeof wrapper.showPopover === 'function') {
+        wrapper.setAttribute('popover', 'manual');
+        wrapper.showPopover();
+      }
+    } catch (err) {
+      wrapper.removeAttribute('popover');
+      logDebug('sidebar could not enter the top layer, falling back to z-index', err);
+    }
 
     sidebarReady = false;
     pendingMessages = [];
@@ -293,7 +294,6 @@
     selectionToolbar = document.createElement('div');
     selectionToolbar.id = 'wtp-selection-toolbar';
     selectionToolbar.innerHTML = `
-      <button data-action="paraphrase" title="Rewrite selection"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg><span>Rewrite</span></button>
       <button data-action="summarize" title="Summarize selection"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="21" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="3" y2="18"/></svg><span>Summarize</span></button>
     `;
     selectionToolbar.style.display = 'none';
@@ -306,13 +306,6 @@
       const sel = window.getSelection();
       const text = sel.toString().trim();
       if (!text) return;
-      if (action === 'paraphrase') {
-        hideGrammarCard();
-        hideSelectionToolbar();
-        openSidebarForWriteAction('paraphrase', { text });
-        return;
-      }
-
       if (action === 'summarize') {
         hideGrammarCard();
         hideSelectionToolbar();
@@ -568,7 +561,7 @@
 
   // ── Text Selection Listener ──
   document.addEventListener('mouseup', (e) => {
-    if (e.target.closest('#wtp-sidebar-wrapper') || e.target.closest('#wtp-selection-toolbar') || e.target.closest('#wtp-fab')) return;
+    if (e.target.closest('#wtp-sidebar-wrapper') || e.target.closest('#wtp-selection-toolbar')) return;
     setTimeout(() => {
       const sel = window.getSelection();
       const text = sel.toString().trim();
@@ -646,6 +639,76 @@
     }
   }
 
+  /* ── Immersive reminders ──────────────────────────────────────
+     The overlay, its scenes and the pill live in ES modules under
+     overlay/, which a classic content script cannot `import` at the top
+     level — hence the dynamic import of an extension URL. It is loaded
+     on the first reminder rather than on every page load, so a tab the
+     user never gets a reminder in pays nothing for this.
+     ───────────────────────────────────────────────────────────── */
+  function getReminderHost() {
+    if (reminderHost) return Promise.resolve(reminderHost);
+    if (reminderHostPromise) return reminderHostPromise;
+
+    const hostUrl = getRuntimeUrl('overlay/reminder-host.js');
+    if (!hostUrl) return Promise.resolve(null);
+
+    reminderHostPromise = import(hostUrl)
+      .then((module) => {
+        reminderHost = module.createReminderHost({
+          doc: document,
+          /* Done resolves the reminder for good; the background decides
+             whether that means completing a one-off or just clearing
+             attention on a recurring ritual. */
+          onDone: (taskId) => {
+            if (!taskId) return;
+            sendRuntimeMessage({ action: 'resolveReminder', taskId })
+              .then(() => refreshReminderIndicator())
+              .catch((err) => logDebug('could not resolve reminder', err));
+          },
+          onDismiss: () => refreshReminderIndicator()
+        });
+        return reminderHost;
+      })
+      .catch((err) => {
+        logDebug('reminder overlay module failed to load', err);
+        reminderHostPromise = null;
+        return null;
+      });
+
+    return reminderHostPromise;
+  }
+
+  async function getNotificationSettings() {
+    const settingsUrl = getRuntimeUrl('lib/notification-settings.js');
+    if (!settingsUrl) return null;
+    try {
+      const module = await import(settingsUrl);
+      return await module.readNotificationSettings(chrome.storage.local);
+    } catch (err) {
+      logDebug('could not read notification settings', err);
+      return null;
+    }
+  }
+
+  async function showReminderOverlay(task) {
+    const settings = await getNotificationSettings();
+    /* fullscreenReminders off means the user asked for the old behaviour:
+       badge and FAB only. */
+    if (!settings || !settings.fullscreenReminders) return;
+
+    const host = await getReminderHost();
+    if (!host) return;
+
+    try {
+      await host.show(task, settings);
+    } catch (err) {
+      /* The host already fell back to the pill, so the reminder is not
+         lost — this is a diagnostic, not a failure path. */
+      logDebug('reminder overlay could not be shown, pill shown instead', err);
+    }
+  }
+
   // ── Messages from background ──
   if (isRuntimeAvailable()) {
     try {
@@ -661,10 +724,6 @@
             panel: msg.panel || 'write',
             focusTaskId: msg.focusTaskId || null
           });
-        }
-        if (msg.action === 'contextMenuParaphrase') {
-          if (!sidebarOpen) toggleSidebar();
-          sendToSidebar({ source: 'wtp-content', action: 'paraphrase', text: msg.text });
         }
         if (msg.action === 'contextMenuGrammar') {
           if (!sidebarOpen) toggleSidebar();
@@ -687,6 +746,11 @@
           sendToSidebar({ source: 'wtp-content', ...msg });
           refreshReminderIndicator();
         }
+        /* Sent to one tab only — the active one — so a user with twenty
+           tabs open gets one overlay, not twenty. */
+        if (msg.action === 'showReminderOverlay' && msg.task) {
+          showReminderOverlay(msg.task);
+        }
       });
     } catch (err) {
       // A stale extension context after reload is expected; anything else is not.
@@ -705,7 +769,6 @@
   });
 
   // ── Init ──
-  createFloatingButton();
   createSelectionToolbar();
   refreshReminderIndicator();
 })();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "WriteTask Pro",
-  "version": "1.0.0",
+  "name": "Tasve",
+  "version": "1.0.1",
   "description": "Local writing assistant, grammar helper, and task manager with no API keys or cloud processing.",
   "permissions": [
     "storage",
@@ -46,7 +46,14 @@
     {
       "resources": [
         "sidebar.html",
-        "icons/*"
+        "icons/*",
+        "overlay/reminder-host.js",
+        "overlay/reminder-overlay.js",
+        "overlay/reminder-pill.js",
+        "overlay/reminder-overlay.css",
+        "lib/reminder-theme.js",
+        "lib/reminder-tone.js",
+        "lib/notification-settings.js"
       ],
       "matches": ["<all_urls>"]
     }

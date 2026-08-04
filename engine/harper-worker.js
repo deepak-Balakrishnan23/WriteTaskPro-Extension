@@ -1,5 +1,5 @@
 /* =========================================================
-   WriteTask Pro — Grammar engine worker
+   Tasve — Grammar engine worker
 
    Owns the single Harper WASM instance and does all linting off
    the main thread. Loaded as a module worker from a bundled,
@@ -57,7 +57,7 @@ function toIssues(lints, text) {
     try {
       span = lint.span();
     } catch (err) {
-      console.debug('[WriteTask Pro] unreadable lint span', err);
+      console.debug('[Tasve] unreadable lint span', err);
       continue;
     }
 

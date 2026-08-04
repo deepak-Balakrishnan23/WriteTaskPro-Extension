@@ -189,6 +189,32 @@ test('the offscreen reason has no automatic teardown', () => {
   assert.match(source, /Reason\.WORKERS/, 'expected the WORKERS reason');
 });
 
+test('every module the content script dynamically imports is web accessible', () => {
+  /* content.js is a classic script, so it reaches the overlay through
+     import(chrome.runtime.getURL(...)). An unlisted file there fails at
+     runtime, in a page, silently — nothing else would catch it. */
+  const resources = (manifest.web_accessible_resources || []).flatMap((entry) => entry.resources || []);
+  for (const file of [
+    'overlay/reminder-host.js',
+    'overlay/reminder-overlay.js',
+    'overlay/reminder-pill.js',
+    'overlay/reminder-overlay.css',
+    'lib/reminder-theme.js',
+    'lib/reminder-tone.js',
+    'lib/notification-settings.js'
+  ]) {
+    assert.ok(resources.includes(file), `${file} is imported at runtime but not web accessible`);
+    assert.ok(fs.existsSync(path.join(ROOT, file)), `${file} is listed but missing from disk`);
+  }
+});
+
+test('the reminder window page and its module exist', () => {
+  assert.ok(fs.existsSync(path.join(ROOT, 'reminder.html')));
+  assert.ok(fs.existsSync(path.join(ROOT, 'reminder-window.js')));
+  const html = fs.readFileSync(path.join(ROOT, 'reminder.html'), 'utf8');
+  assert.match(html, /type="module"/, 'the window page loads ES modules directly');
+});
+
 test('no lingering permission is requested that the code never uses', () => {
   // notifications is not requested yet — reminders currently surface only as a
   // badge. Recorded here so adding the permission is a deliberate change.

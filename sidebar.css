@@ -1,5 +1,5 @@
 /* =========================================================
-   WriteTask Pro — Sidebar Styles (ALL BUGS FIXED)
+   Tasve — Sidebar Styles (ALL BUGS FIXED)
    BUG-11 FIX: @import removed — fonts loaded non-blocking via <link> in HTML
    ========================================================= */
 
@@ -54,7 +54,6 @@ body {
 .header-left { display: flex; align-items: center; gap: 8px; }
 .header-left svg { color: var(--accent); }
 .header-left h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
-.header-left .pro { background: linear-gradient(135deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
 .header-right { display: flex; gap: 4px; }
 
 .icon-btn { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: none; background: transparent; color: var(--text-secondary); border-radius: var(--radius-sm); cursor: pointer; transition: background 0.15s, color 0.15s; }
@@ -76,7 +75,6 @@ body {
 .section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-muted); }
 .section-help { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
 .write-intro { padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-secondary); }
-.style-section { gap: 6px; }
 
 textarea, input[type="text"], input[type="password"], input[type="number"], select { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-input); color: var(--text-primary); font-family: var(--font); font-size: 13px; outline: none; transition: border-color 0.2s; width: 100%; }
 textarea { resize: vertical; min-height: 80px; line-height: 1.6; }
@@ -85,11 +83,9 @@ textarea::placeholder, input::placeholder { color: var(--text-muted); }
 select { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8ba7' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 30px; }
 
 .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-.style-badges { display: flex; gap: 8px; flex-wrap: wrap; }
-.mode-btn, .tone-btn, .priority-btn, .ritual-btn, .duration-btn, .recurrence-btn, .time-btn { padding: 7px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-tertiary); color: var(--text-secondary); font-family: var(--font); font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s; text-align: center; }
-.mode-btn:hover, .tone-btn:hover, .priority-btn:hover, .ritual-btn:hover, .duration-btn:hover, .recurrence-btn:hover, .time-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
-.mode-btn.active { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent); }
-.mode-btn.badge, .priority-btn, .ritual-btn, .duration-btn, .recurrence-btn, .time-btn { width: auto; padding: 6px 12px; border-radius: 999px; font-size: 11px; }
+.tone-btn, .priority-btn, .ritual-btn, .duration-btn, .recurrence-btn, .time-btn { padding: 7px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-tertiary); color: var(--text-secondary); font-family: var(--font); font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s; text-align: center; }
+.tone-btn:hover, .priority-btn:hover, .ritual-btn:hover, .duration-btn:hover, .recurrence-btn:hover, .time-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.priority-btn, .ritual-btn, .duration-btn, .recurrence-btn, .time-btn { width: auto; padding: 6px 12px; border-radius: 999px; font-size: 11px; }
 .priority-badges { display: flex; gap: 8px; flex-wrap: wrap; }
 .priority-btn.active, .duration-btn.active, .recurrence-btn.active, .time-btn.active { background: var(--accent-subtle); color: var(--accent); border-color: var(--accent); }
 .ritual-badges, .duration-badges, .recurrence-badges, .time-badges { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -100,7 +96,8 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .ritual-btn[data-kind="lunch"].active { background: rgba(248, 113, 113, 0.16); color: var(--danger); border-color: rgba(248, 113, 113, 0.3); }
 
 .action-row { display: flex; flex-wrap: wrap; gap: 6px; }
-.primary-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+/* Two columns since Improve was removed; three left a stretched empty cell. */
+.primary-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .compact-actions .action-btn { flex: 1; justify-content: center; }
 .advanced-toggle { align-self: flex-start; }
 .advanced-panel { display: flex; flex-direction: column; gap: 12px; padding: 12px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); }
@@ -121,7 +118,7 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .result-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
 .result-subtitle { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .result-actions { display: flex; gap: 4px; }
-#result-content { padding: 12px; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
+#result-content { padding: 12px; font-size: 13px; line-height: 1.7; word-break: break-word; max-height: 300px; overflow-y: auto; }
 
 .grammar-item { padding: 10px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-tertiary); }
 .grammar-item .original { color: var(--danger); text-decoration: line-through; font-family: var(--mono); font-size: 12px; }
@@ -203,12 +200,22 @@ select { cursor: pointer; appearance: none; background-image: url("data:image/sv
 .task-action-btn { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: none; background: transparent; color: var(--text-muted); cursor: pointer; border-radius: 4px; transition: all 0.15s; }
 .task-action-btn:hover { background: var(--bg-hover); color: var(--danger); }
 
-.settings-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+.settings-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.settings-title { font-size: 18px; font-weight: 700; margin-bottom: 0; }
 .setting-group { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
 .setting-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .setting-hint { font-size: 11px; color: var(--text-muted); }
 .setting-hint a { color: var(--accent); text-decoration: none; }
 .setting-hint a:hover { text-decoration: underline; }
+/* Notification controls. 20px targets on a 13px row keep the checkbox
+   comfortably clickable without the row growing taller than the text. */
+.setting-check { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; color: var(--text-primary); cursor: pointer; }
+.setting-check input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; flex: none; }
+.setting-slider { display: flex; align-items: center; gap: 10px; padding: 2px 0 6px 24px; font-size: 12px; color: var(--text-secondary); }
+.setting-slider input[type="range"] { flex: 1; accent-color: var(--accent); cursor: pointer; }
+.setting-slider input[type="range"]:disabled { cursor: not-allowed; opacity: 0.45; }
+.setting-slider output { min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+
 .settings-actions { display: flex; gap: 8px; margin-top: 16px; }
 .settings-actions .action-btn { flex: 1; justify-content: center; }
 

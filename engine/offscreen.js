@@ -1,5 +1,5 @@
 /* =========================================================
-   WriteTask Pro — Offscreen engine host
+   Tasve — Offscreen engine host
 
    The service worker is killed after 30 seconds idle, and bringing
    Harper back up costs about half a second of WASM compilation. An
@@ -37,7 +37,7 @@ worker.addEventListener('error', (event) => {
   // A module-worker load failure lands here and would otherwise strand
   // every caller. Fail them all loudly instead.
   const message = event.message || 'Grammar engine worker failed to load';
-  console.error('[WriteTask Pro] engine worker error:', message);
+  console.error('[Tasve] engine worker error:', message);
   for (const [id, settle] of pending) {
     pending.delete(id);
     settle.reject(new Error(message));
@@ -65,7 +65,7 @@ function callWorker(type, payload, timeoutMs = 15000) {
    WASM compile overlaps with the user still typing. */
 const engineReady = callWorker('init', { wasmUrl: WASM_URL, dialect: 'american' }, 30000)
   .catch((err) => {
-    console.error('[WriteTask Pro] engine failed to initialise:', err.message);
+    console.error('[Tasve] engine failed to initialise:', err.message);
     throw err;
   });
 

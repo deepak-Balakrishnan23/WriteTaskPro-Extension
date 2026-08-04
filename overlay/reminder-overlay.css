@@ -1,0 +1,430 @@
+/* =========================================================
+   Tasve — Immersive reminder overlay
+
+   Loaded into a shadow root, so selectors stay short and host page CSS
+   cannot reach in.
+
+   PERFORMANCE CONTRACT, enforced by test/reminder-overlay.css.test.js:
+   every @keyframes block animates only transform, opacity and filter —
+   properties Chrome composites off the main thread — so all five scenes
+   hold 60 FPS on a busy page. Two deliberate exceptions, both documented
+   at their keyframes: the countdown ring's stroke-dashoffset (one small
+   element, no compositor equivalent) and nothing else.
+
+   backdrop-filter is set statically and revealed by animating the
+   opacity of the layer that carries it. Animating backdrop-filter
+   itself forces a full re-blur every frame and drops to ~20 FPS.
+   ========================================================= */
+
+:host {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: block;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  overflow: visible;
+  /* The host page's font stack is irrelevant here and often surprising. */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+.root {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  --from: #4f46e5;
+  --to: #1e1b4b;
+  --accent: #a5b4fc;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ── Entrance / exit ──────────────────────────────────────────
+   380ms in, 320ms out, both inside the 300-500ms brief. The scrim
+   and the card move independently so the background settles before
+   the card lands. */
+.scrim, .scene { opacity: 0; transition: opacity 380ms var(--ease); }
+.card {
+  opacity: 0;
+  transform: scale(0.96) translateY(8px);
+  transition: opacity 380ms var(--ease), transform 380ms var(--ease);
+}
+
+.root.is-in .scrim, .root.is-in .scene { opacity: 1; }
+.root.is-in .card { opacity: 1; transform: scale(1) translateY(0); }
+
+.root.is-out .scrim, .root.is-out .scene { opacity: 0; transition-duration: 320ms; }
+.root.is-out .card {
+  opacity: 0;
+  transform: scale(0.98) translateY(4px);
+  transition-duration: 320ms;
+}
+
+/* ── Backdrop ─────────────────────────────────────────────── */
+.scrim {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 100% at 50% 0%, color-mix(in srgb, var(--from) 70%, transparent) 0%, transparent 70%),
+    linear-gradient(160deg, var(--from) 0%, var(--to) 100%);
+}
+
+/* Carries the blur statically; .is-in fades it in for the "gentle blur
+   transition" without animating the filter itself. */
+.frost {
+  position: absolute;
+  inset: 0;
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  opacity: 0;
+  transition: opacity 420ms var(--ease);
+}
+.root.is-in .frost { opacity: 1; }
+.root.is-out .frost { opacity: 0; transition-duration: 300ms; }
+
+.scene { position: absolute; inset: 0; pointer-events: none; }
+
+/* ══ Scene: water ═══════════════════════════════════════════
+   Three wave layers at different speeds read as parallax depth.
+   Each path is 200% wide and translates exactly -50%, so the loop
+   is seamless. */
+.wave {
+  position: absolute;
+  left: 0;
+  width: 200%;
+  height: 38vmax;
+  bottom: -6vmax;
+  will-change: transform;
+  animation: wave-drift linear infinite;
+}
+.wave svg { display: block; width: 100%; height: 100%; }
+.wave-1 { animation-duration: 18s; opacity: 0.34; bottom: -2vmax; }
+.wave-2 { animation-duration: 13s; opacity: 0.26; bottom: -5vmax; }
+.wave-3 { animation-duration: 9s;  opacity: 0.18; bottom: -8vmax; }
+
+@keyframes wave-drift {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-50%, 0, 0); }
+}
+
+.drop {
+  position: absolute;
+  top: -4vmax;
+  width: 0.7vmax;
+  height: 1.1vmax;
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 90%, transparent), transparent);
+  will-change: transform, opacity;
+  animation: drop-fall linear infinite;
+}
+
+@keyframes drop-fall {
+  0%   { transform: translate3d(0, 0, 0) scale(0.8); opacity: 0; }
+  12%  { opacity: 0.85; }
+  78%  { opacity: 0.7; }
+  100% { transform: translate3d(0, 108vh, 0) scale(1.05); opacity: 0; }
+}
+
+/* The ripple each drop leaves at rest level. */
+.ripple {
+  position: absolute;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: 50%;
+  width: 10vmax;
+  height: 10vmax;
+  /* Low enough to sit in the wave band rather than above it. */
+  bottom: 3vmax;
+  will-change: transform, opacity;
+  animation: ripple-out ease-out infinite;
+}
+
+/* Flattened on Y so the ring reads as a ripple seen at a low angle, rather
+   than a circle hanging in mid-air. */
+@keyframes ripple-out {
+  0%   { transform: scale3d(0.1, 0.04, 1); opacity: 0; }
+  20%  { opacity: 0.4; }
+  100% { transform: scale3d(1, 0.22, 1); opacity: 0; }
+}
+
+/* ══ Scene: screen ══════════════════════════════════════════
+   A slow breathing glow paced for eye relief — 6s per cycle, close
+   to a relaxed exhale, so looking at it slows you down. */
+.glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 70vmax;
+  height: 70vmax;
+  margin: -35vmax 0 0 -35vmax;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 34%, transparent) 0%, transparent 62%);
+  will-change: transform, opacity;
+  animation: breathe 6s ease-in-out infinite alternate;
+}
+
+@keyframes breathe {
+  from { transform: scale(1);    opacity: 0.55; }
+  to   { transform: scale(1.12); opacity: 0.9; }
+}
+
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 26%, transparent) 0%, transparent 70%);
+  filter: blur(6px);
+  will-change: transform;
+  animation: orb-drift ease-in-out infinite alternate;
+}
+.orb-1 { width: 30vmax; height: 30vmax; left: 8%;  top: 14%; animation-duration: 14s; }
+.orb-2 { width: 22vmax; height: 22vmax; right: 12%; top: 22%; animation-duration: 18s; }
+.orb-3 { width: 26vmax; height: 26vmax; left: 26%; bottom: 8%; animation-duration: 16s; }
+
+@keyframes orb-drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(3vmax, -4vmax, 0) scale(1.08); }
+}
+
+/* ══ Scene: tea ═════════════════════════════════════════════ */
+.wisp {
+  position: absolute;
+  bottom: -10vmax;
+  width: 14vmax;
+  height: 46vmax;
+  border-radius: 50%;
+  /* White, not the accent: an amber wisp on an amber scrim is invisible.
+     The palette still comes through from the scrim underneath. */
+  background: linear-gradient(0deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.06) 45%, transparent 75%);
+  filter: blur(16px);
+  will-change: transform, opacity;
+  animation: steam-rise ease-in-out infinite;
+}
+.wisp-1 { left: 34%; animation-duration: 9s;  }
+.wisp-2 { left: 48%; animation-duration: 11s; animation-delay: 1.4s; }
+.wisp-3 { left: 60%; animation-duration: 13s; animation-delay: 2.6s; }
+
+@keyframes steam-rise {
+  0%   { transform: translate3d(0, 0, 0) skewX(0deg) scale(0.9); opacity: 0; }
+  25%  { opacity: 0.6; }
+  55%  { transform: translate3d(2vmax, -30vh, 0) skewX(6deg) scale(1.05); }
+  100% { transform: translate3d(-2vmax, -62vh, 0) skewX(-5deg) scale(1.2); opacity: 0; }
+}
+
+/* ══ Scene: lunch ═══════════════════════════════════════════ */
+.plate {
+  position: absolute;
+  left: 50%;
+  bottom: -30vmax;
+  width: 88vmax;
+  height: 88vmax;
+  margin-left: -44vmax;
+  border-radius: 50%;
+  /* Same reason as the steam: orange on orange read as nothing at all. */
+  background: radial-gradient(circle at 50% 40%, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.08) 32%, transparent 62%);
+  will-change: transform, opacity;
+  animation: plate-warm 7s ease-in-out infinite alternate;
+}
+
+@keyframes plate-warm {
+  from { transform: scale(1) translate3d(0, 0, 0);      opacity: 0.6; }
+  to   { transform: scale(1.06) translate3d(0, -2vmax, 0); opacity: 0.95; }
+}
+
+/* ══ Scene: focus ═══════════════════════════════════════════ */
+.pulse {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 46vmax;
+  height: 46vmax;
+  margin: -23vmax 0 0 -23vmax;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  will-change: transform, opacity;
+  animation: focus-pulse 4.5s ease-out infinite;
+}
+.pulse-2 { animation-delay: 1.5s; }
+.pulse-3 { animation-delay: 3s; }
+
+@keyframes focus-pulse {
+  0%   { transform: scale(0.55); opacity: 0; }
+  25%  { opacity: 0.5; }
+  100% { transform: scale(1.3); opacity: 0; }
+}
+
+/* ══ Glass card ═════════════════════════════════════════════ */
+.card {
+  position: relative;
+  width: min(92vw, 520px);
+  padding: clamp(24px, 5vw, 40px);
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  color: #fff;
+  text-align: center;
+}
+
+.icon {
+  font-size: clamp(2.6rem, 8vw, 4rem);
+  line-height: 1;
+  margin-bottom: 12px;
+}
+
+.headline {
+  font-size: clamp(1.5rem, 5vw, 2.4rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  /* Pure white on every palette clears 4.5:1 comfortably. */
+  color: #fff;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.28);
+}
+
+.message {
+  margin-top: 12px;
+  font-size: clamp(0.95rem, 2.4vw, 1.1rem);
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.foot {
+  margin-top: clamp(20px, 4vw, 30px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.done {
+  min-height: 44px;
+  padding: 0 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.94);
+  color: #14142b;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms var(--ease), background 140ms linear;
+}
+.done:hover { background: #fff; transform: translateY(-1px); }
+.done:active { transform: translateY(0); }
+
+.dismiss {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms linear, color 140ms linear;
+}
+.dismiss:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+
+/* ── Countdown ring ───────────────────────────────────────── */
+.ring { position: relative; width: 44px; height: 44px; flex: none; }
+.ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.ring .track { fill: none; stroke: rgba(255, 255, 255, 0.22); stroke-width: 3; }
+.ring .bar {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 3;
+  stroke-linecap: round;
+  /* 2πr for r=19. Set again in JS so the two can never drift apart. */
+  stroke-dasharray: 119.38;
+  animation: ring-drain linear forwards;
+}
+.ring .secs {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* DELIBERATE EXCEPTION to the transform/opacity/filter rule: there is no
+   compositor-friendly way to drain a stroke. It is one 44px element with
+   no layout impact, and it is the only non-composited animation here. */
+@keyframes ring-drain {
+  from { stroke-dashoffset: 0; }
+  to   { stroke-dashoffset: 119.38; }
+}
+
+/* Announced once by a screen reader, never shown. The per-second number
+   is aria-hidden instead, so the countdown cannot spam the announcer. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── Focus visibility ─────────────────────────────────────── */
+.done:focus-visible, .dismiss:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+
+/* ── Reduced motion ───────────────────────────────────────────
+   Driven by the OS setting *or* the extension's own "Smooth animations"
+   toggle, which sets data-reduced="true". Ambient loops stop entirely —
+   a breathing glow is exactly what motion sensitivity reacts to — and
+   the entrance collapses to a plain fade. The countdown becomes a
+   number, since a draining ring is itself motion. */
+@media (prefers-reduced-motion: reduce) {
+  .wave, .drop, .ripple, .glow, .orb, .wisp, .plate, .pulse { animation: none; }
+  .drop, .ripple { display: none; }
+  .glow, .plate { opacity: 0.75; }
+  .scrim, .scene, .frost { transition-duration: 160ms; }
+  .card { transition: opacity 160ms linear; transform: none; }
+  .root.is-in .card { transform: none; }
+  .root.is-out .card { transform: none; }
+  .ring .bar { animation: none; stroke-dashoffset: 0; }
+}
+
+.root[data-reduced="true"] .wave,
+.root[data-reduced="true"] .drop,
+.root[data-reduced="true"] .ripple,
+.root[data-reduced="true"] .glow,
+.root[data-reduced="true"] .orb,
+.root[data-reduced="true"] .wisp,
+.root[data-reduced="true"] .plate,
+.root[data-reduced="true"] .pulse { animation: none; }
+.root[data-reduced="true"] .drop,
+.root[data-reduced="true"] .ripple { display: none; }
+.root[data-reduced="true"] .glow,
+.root[data-reduced="true"] .plate { opacity: 0.75; }
+.root[data-reduced="true"] .scrim,
+.root[data-reduced="true"] .scene,
+.root[data-reduced="true"] .frost { transition-duration: 160ms; }
+.root[data-reduced="true"] .card { transition: opacity 160ms linear; transform: none; }
+.root[data-reduced="true"].is-in .card { transform: none; }
+.root[data-reduced="true"].is-out .card { transform: none; }
+.root[data-reduced="true"] .ring .bar { animation: none; stroke-dashoffset: 0; }
+
+/* ── Narrow windows ───────────────────────────────────────── */
+@media (max-width: 420px) {
+  .card { width: 94vw; border-radius: 20px; }
+  .foot { gap: 12px; }
+  .done { width: 100%; }
+}

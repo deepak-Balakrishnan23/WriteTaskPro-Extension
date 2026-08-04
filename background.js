@@ -1,30 +1,23 @@
 /* =========================================================
-   WriteTask Pro — Background Service Worker
+   Tasve — Background Service Worker
 
-   Local-first rewrite:
+   Local-first, and local-only:
    - No API calls
    - No API keys
+   - No model download
    - All writing/task logic runs in-browser
    ========================================================= */
 
-import { sentenceTexts, mapBlocks } from './lib/segment.js';
 import { buildBriefSummary } from './lib/summarize.js';
 import { lintText, engineReady } from './lib/engine-client.js';
-import {
-  normalizeWhitespace,
-  titleCase,
-  escapeRegExp,
-  cleanupSpacing,
-  sentenceCaseText,
-  ensureTrailingPunctuation
-} from './lib/text.js';
+import { readNotificationSettings } from './lib/notification-settings.js';
+import { normalizeWhitespace } from './lib/text.js';
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({ id: 'writetask-paraphrase', title: 'WriteTask Pro: Paraphrase Selection', contexts: ['selection'] });
-    chrome.contextMenus.create({ id: 'writetask-grammar', title: 'WriteTask Pro: Check Grammar', contexts: ['selection'] });
-    chrome.contextMenus.create({ id: 'writetask-add-task', title: 'WriteTask Pro: Add as Task', contexts: ['selection'] });
-    chrome.contextMenus.create({ id: 'writetask-summarize', title: 'WriteTask Pro: Summarize Page', contexts: ['page'] });
+    chrome.contextMenus.create({ id: 'writetask-grammar', title: 'Tasve: Check Grammar', contexts: ['selection'] });
+    chrome.contextMenus.create({ id: 'writetask-add-task', title: 'Tasve: Add as Task', contexts: ['selection'] });
+    chrome.contextMenus.create({ id: 'writetask-summarize', title: 'Tasve: Summarize Page', contexts: ['page'] });
   });
 
   chrome.storage.local.get(['wtp_settings'], (result) => {
@@ -43,302 +36,28 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab?.id) return;
   const send = (msg) => chrome.tabs.sendMessage(tab.id, msg).catch(() => {});
 
-  if (info.menuItemId === 'writetask-paraphrase') send({ action: 'contextMenuParaphrase', text: info.selectionText });
-  else if (info.menuItemId === 'writetask-grammar') send({ action: 'contextMenuGrammar', text: info.selectionText });
+  if (info.menuItemId === 'writetask-grammar') send({ action: 'contextMenuGrammar', text: info.selectionText });
   else if (info.menuItemId === 'writetask-add-task') send({ action: 'contextMenuAddTask', text: info.selectionText, url: info.pageUrl });
   else if (info.menuItemId === 'writetask-summarize') send({ action: 'contextMenuSummarize' });
 });
 
-/* Sentence splitting lives in lib/segment.js, and the string helpers in
-   lib/text.js. The regex splitter that used to be here treated every
-   period as a terminator, so decimals, honorifics, initialisms and
-   version strings all shattered — which is how a summary came to report
-   2 billion instead of 4.2 billion. */
-function splitSentences(text) {
-  return sentenceTexts(text);
-}
+/* =========================================================
+   No generative rewriting
 
-function replaceWholeWord(text, original, suggestion) {
-  const regex = new RegExp(`\\b${escapeRegExp(original)}\\b`, 'gi');
-  return text.replace(regex, (match) => {
-    if (match.toUpperCase() === match) return suggestion.toUpperCase();
-    if (match[0] === match[0].toUpperCase()) return titleCase(suggestion);
-    return suggestion;
-  });
-}
+   Rewrite/Formal/Casual/Professional/Friendly/Expand/Shorten and the
+   AI summarizer are gone, along with the Gemini Nano plumbing behind
+   them. Chrome's built-in AI is the only local option and it needs a
+   2-4GB on-device model with no smaller tier, so on any machine that
+   has not downloaded it every one of those buttons was dead. A regex
+   cannot stand in for them — the deleted version proved that by
+   turning "The contract was signed by both parties" into "Both signed
+   the contract parties".
 
-function applyPhraseReplacements(text, replacements) {
-  let result = text;
-  replacements.forEach(([pattern, replacement]) => {
-    result = result.replace(pattern, replacement);
-  });
-  return result;
-}
-
-const TOKEN_CORRECTIONS = {
-  heloo: 'hello',
-  helow: 'hello',
-  helooo: 'hello',
-  heloow: 'hello',
-  heloww: 'hello',
-  heloowyou: 'hello you',
-  hellowyou: 'hello you',
-  helloyou: 'hello you',
-  wnat: 'want',
-  wnatfood: 'want food',
-  wannafood: 'want food',
-  u: 'you',
-  ur: 'your'
-};
-
-const SPLIT_WORDS = new Set([
-  'a', 'am', 'approve', 'approval', 'are', 'food', 'good', 'hello', 'help',
-  'holiday', 'how', 'i', 'leave', 'me', 'my', 'need', 'now', 'please',
-  'request', 'thanks', 'today', 'want', 'you', 'your'
-]);
-
-function splitMergedToken(token) {
-  const lower = token.toLowerCase();
-  const length = lower.length;
-  const best = new Array(length + 1).fill(null);
-  best[0] = [];
-
-  for (let i = 0; i < length; i += 1) {
-    if (!best[i]) continue;
-    for (let j = i + 1; j <= Math.min(length, i + 10); j += 1) {
-      const chunk = lower.slice(i, j);
-      if (!SPLIT_WORDS.has(chunk)) continue;
-      const candidate = [...best[i], chunk];
-      if (!best[j] || candidate.length < best[j].length) {
-        best[j] = candidate;
-      }
-    }
-  }
-
-  if (!best[length] || best[length].length < 2) return token;
-
-  const rebuilt = best[length]
-    .map((word, index) => {
-      if (index === 0 && token[0] === token[0]?.toUpperCase()) return titleCase(word);
-      return word;
-    })
-    .join(' ');
-
-  return rebuilt;
-}
-
-function normalizeTokens(text) {
-  return String(text || '').replace(/\b[a-zA-Z]{2,}\b/g, (token) => {
-    const corrected = TOKEN_CORRECTIONS[token.toLowerCase()];
-    if (corrected) {
-      if (token[0] === token[0].toUpperCase()) {
-        return corrected.replace(/\b([a-z])/g, (match, letter, offset) => offset === 0 ? letter.toUpperCase() : letter);
-      }
-      return corrected;
-    }
-    return splitMergedToken(token);
-  });
-}
-
-function applyCoreCorrections(text) {
-  let result = normalizeTokens(normalizeWhitespace(text))
-    .replace(/\bi am\b/gi, 'I am')
-    .replace(/\bim\b/gi, "I'm")
-    .replace(/\bi\b/g, 'I')
-    .replace(/\bpls\b/gi, 'please')
-    .replace(/\bthx\b/gi, 'thanks');
-
-  COMMON_REPLACEMENTS.forEach(([original, suggestion]) => {
-    result = replaceWholeWord(result, original, suggestion);
-  });
-
-  result = applyPhraseReplacements(result, [
-    [/\bwant holiday approve\b/gi, 'want holiday approval'],
-    [/\bneed holiday approve\b/gi, 'need holiday approval'],
-    [/\bholiday approve\b/gi, 'holiday approval'],
-    [/\bleave approve\b/gi, 'leave approval'],
-    [/\bapprove my holiday\b/gi, 'approve my holiday request'],
-    [/\bi want leave\b/gi, 'I want leave approval'],
-    [/\bi need leave\b/gi, 'I need leave approval'],
-    [/\bi want holiday\b/gi, 'I want holiday approval'],
-    [/\bi need holiday\b/gi, 'I need holiday approval'],
-    [/\bcan you approve\b/gi, 'could you approve'],
-    [/\bkindly approve\b/gi, 'please approve']
-  ]);
-
-  result = cleanupSpacing(sentenceCaseText(result));
-  return ensureTrailingPunctuation(result);
-}
-
-/* findVerbProblem is gone with checkGrammar; it hard-coded four patterns
-   about wanting leave or a holiday. COMMON_REPLACEMENTS below survives only
-   because the paraphrase rewriter still leans on it, and dies with that. */
-
-const COMMON_REPLACEMENTS = [
-  ['teh', 'the', 'Spelling', 'A common typo.'],
-  ['recieve', 'receive', 'Spelling', '“Receive” follows the “i before e except after c” pattern.'],
-  ['seperate', 'separate', 'Spelling', 'The correct spelling is “separate.”'],
-  ['definately', 'definitely', 'Spelling', 'The correct spelling is “definitely.”'],
-  ['occured', 'occurred', 'Spelling', '“Occurred” uses a double “r.”'],
-  ['alot', 'a lot', 'Word choice', 'Use “a lot” as two words.'],
-  ['wich', 'which', 'Spelling', 'The standard form is “which.”'],
-  ['becuase', 'because', 'Spelling', 'The correct spelling is “because.”'],
-  ['dont', "don't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['cant', "can't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['wont', "won't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['doesnt', "doesn't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['im', "I'm", 'Capitalization', 'Capitalize the pronoun and add the apostrophe.']
-];
-
-/* checkGrammar is gone. It was a 13-entry typo table matched with \bword\b,
-   so it could not see a single inflected form — "recieved", "seperated" and
-   "occuring" all passed clean even though their stems were in the table.
-   Grammar and spelling now come from Harper (see lib/engine-client.js),
-   which returns real spans and replacement lists. */
-
-function applyStandardRewrite(text) {
-  let result = applyCoreCorrections(text);
-
-  [
-    ['utilize', 'use'],
-    ['in order to', 'to'],
-    ['at this point in time', 'now'],
-    ['due to the fact that', 'because'],
-    ['a number of', 'several'],
-    ['kind of', 'somewhat'],
-    ['sort of', 'somewhat']
-  ].forEach(([from, to]) => {
-    result = replaceWholeWord(result, from, to);
-  });
-
-  const sentences = splitSentences(result).map((sentence) => {
-    const clean = cleanupSpacing(sentence);
-    return clean ? titleCase(clean) : clean;
-  });
-
-  result = cleanupSpacing(sentences.join(' '));
-  result = applyPhraseReplacements(result, [
-    [/\bI want leave\b/gi, 'I want to leave'],
-    [/\bI need leave\b/gi, 'I need to leave'],
-    [/\bI want go\b/gi, 'I want to go'],
-    [/\bI need go\b/gi, 'I need to go'],
-    [/\bI want take leave\b/gi, 'I want to take leave'],
-    [/\bI need take leave\b/gi, 'I need to take leave']
-  ]);
-  result = result.replace(/\bI want holiday approval\b/i, 'I want my holiday approved');
-  result = result.replace(/\bI need holiday approval\b/i, 'I need my holiday approved');
-  result = result.replace(/\bI want leave approval\b/i, 'I want my leave approved');
-  result = result.replace(/\bI need leave approval\b/i, 'I need my leave approved');
-  return ensureTrailingPunctuation(result);
-}
-
-function applyFormalRewrite(text) {
-  let result = applyStandardRewrite(text);
-  [
-    ["can't", 'cannot'],
-    ["won't", 'will not'],
-    ["don't", 'do not'],
-    ["doesn't", 'does not'],
-    ["isn't", 'is not'],
-    ["it's", 'it is'],
-    ["we're", 'we are'],
-    ["I'm", 'I am'],
-    ['kids', 'children'],
-    ['buy', 'purchase'],
-    ['get', 'obtain'],
-    ['help', 'assist']
-  ].forEach(([from, to]) => {
-    result = replaceWholeWord(result, from, to);
-  });
-
-  result = applyPhraseReplacements(result, [
-    [/\bI want my holiday approved\b/i, 'I would like to request approval for my holiday'],
-    [/\bI need my holiday approved\b/i, 'I would like to request approval for my holiday'],
-    [/\bI want my leave approved\b/i, 'I would like to request approval for my leave'],
-    [/\bI need my leave approved\b/i, 'I would like to request approval for my leave']
-  ]);
-
-  return ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(result)));
-}
-
-function applyCasualRewrite(text) {
-  let result = applyStandardRewrite(text);
-  [
-    ['cannot', "can't"],
-    ['do not', "don't"],
-    ['will not', "won't"],
-    ['I am', "I'm"],
-    ['we are', "we're"],
-    ['it is', "it's"],
-    ['you are', "you're"]
-  ].forEach(([from, to]) => {
-    result = replaceWholeWord(result, from, to);
-  });
-
-  result = applyPhraseReplacements(result, [
-    [/\bI want my holiday approved\b/i, "I'd like my holiday approved"],
-    [/\bI need my holiday approved\b/i, "I'd like my holiday approved"],
-    [/\bI want my leave approved\b/i, "I'd like my leave approved"],
-    [/\bI need my leave approved\b/i, "I'd like my leave approved"]
-  ]);
-
-  return ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(result)));
-}
-
-function applyShortenRewrite(text) {
-  const fillers = /\b(really|very|actually|basically|just|perhaps|quite|somewhat|that)\b/gi;
-  return cleanupSpacing(
-    applyStandardRewrite(text)
-      .replace(fillers, '')
-      .replace(/\s{2,}/g, ' ')
-  );
-}
-
-function applyExpandRewrite(text) {
-  const sentences = splitSentences(applyStandardRewrite(text));
-  return sentences
-    .map((sentence, index) => {
-      if (sentence.split(' ').length < 7) {
-        const prefix = index === 0 ? 'To add a bit more context, ' : 'In practical terms, ';
-        return `${prefix}${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
-      }
-      return `${sentence} This adds a bit more clarity and context.`;
-    })
-    .join(' ');
-}
-
-function applyCreativeRewrite(text) {
-  const sentences = splitSentences(applyStandardRewrite(text));
-  return sentences
-    .map((sentence, index) => {
-      const prefix = index === 0 ? 'Think of it this way: ' : 'Another way to frame it: ';
-      return `${prefix}${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
-    })
-    .join(' ');
-}
-
-const REWRITE_MODES = {
-  formal: applyFormalRewrite,
-  casual: applyCasualRewrite,
-  shorten: applyShortenRewrite,
-  expand: applyExpandRewrite,
-  creative: applyCreativeRewrite,
-  standard: applyStandardRewrite
-};
-
-/* Every rewrite runs per paragraph and the blank lines are restored
-   afterwards. Previously the pipeline began with normalizeWhitespace,
-   so a multi-paragraph draft came back as a single block — and the
-   checker then reported a "Multiple spaces" issue on the text it had
-   just flattened. */
-function paraphraseText(text, mode = 'standard') {
-  const source = text || '';
-  if (!source.trim()) return '';
-
-  const transform = REWRITE_MODES[mode] || REWRITE_MODES.standard;
-  return mapBlocks(source, transform);
-}
-
+   What is left is what works offline with no model: Harper for
+   grammar (see lib/engine-client.js) and the extractive summarizer in
+   lib/summarize.js, which selects real sentences rather than
+   generating new ones.
+   ========================================================= */
 
 /* The "humanize" block is gone: SIMPLE_WORD_MAP, humanizeConnectors,
    depassivizeSentence, splitLongSentence, humanizeSentence, the bigram
@@ -543,12 +262,12 @@ function getNextRecurringReminder(task, fromDate = new Date()) {
 
 function getReminderTitle(task) {
   const titles = {
-    focus: 'WriteTask Pro — Focus time',
-    water: 'WriteTask Pro — Water break',
-    screen: 'WriteTask Pro — Screen break',
-    tea: 'WriteTask Pro — Tea break',
-    lunch: 'WriteTask Pro — Lunch break',
-    task: 'WriteTask Pro — Reminder'
+    focus: 'Tasve — Focus time',
+    water: 'Tasve — Water break',
+    screen: 'Tasve — Screen break',
+    tea: 'Tasve — Tea break',
+    lunch: 'Tasve — Lunch break',
+    task: 'Tasve — Reminder'
   };
   return titles[task.kind] || titles.task;
 }
@@ -570,7 +289,12 @@ function buildReminderPayload(task) {
     id: task.id,
     kind: task.kind,
     title: getReminderTitle(task),
-    message: getReminderMessage(task)
+    message: getReminderMessage(task),
+    /* The user's own wording, kept separate from the notification title so
+       the overlay can show it as the message without inheriting the
+       "Tasve — " prefix. */
+    taskTitle: typeof task.title === 'string' ? task.title : '',
+    recurring: Boolean(task.recurring)
   };
 }
 
@@ -583,8 +307,8 @@ async function updateActionBadge(tasksInput = null) {
   await chrome.action.setBadgeText({ text: attentionCount > 0 ? String(Math.min(attentionCount, 99)) : '' });
   await chrome.action.setTitle({
     title: attentionCount > 0
-      ? `WriteTask Pro (${attentionCount} reminder${attentionCount === 1 ? '' : 's'} ready${readyTasks[0]?.title ? `: ${readyTasks[0].title}` : ''})`
-      : 'WriteTask Pro'
+      ? `Tasve (${attentionCount} reminder${attentionCount === 1 ? '' : 's'} ready${readyTasks[0]?.title ? `: ${readyTasks[0].title}` : ''})`
+      : 'Tasve'
   });
 }
 
@@ -616,6 +340,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         await saveTasksToStorage(tasks);
         await updateActionBadge(tasks);
         broadcastMessage({ action: 'reminderTriggered', task: reminderPayload });
+        await routeReminder(reminderPayload);
         if (task.recurring) {
           const nextReminder = getNextRecurringReminder(task, new Date());
           if (nextReminder) {
@@ -629,7 +354,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       }
     }
   } catch (err) {
-    console.error('WriteTask Pro alarm error:', err);
+    console.error('Tasve alarm error:', err);
   }
 });
 
@@ -679,6 +404,83 @@ async function extendTaskReminder(taskId, minutes) {
   broadcastMessage({ action: 'tasksUpdated' });
 }
 
+/* =========================================================
+   Reminder routing
+
+   The overlay renders in a page, so it needs a page to render in. The
+   active tab is the first choice — instant, no window flash. When there
+   isn't one we can inject into (a chrome:// page, the Web Store, no open
+   window at all) a maximized popup window running reminder.html takes
+   over, so a reminder is never silently dropped just because of what the
+   user happened to be looking at.
+   ========================================================= */
+
+const INJECTABLE = /^https?:\/\//i;
+
+async function getActiveInjectableTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id && INJECTABLE.test(tab.url || '')) return tab;
+  } catch {
+    /* No focused window, or the query raced a closing one. */
+  }
+  return null;
+}
+
+async function openReminderWindow(task) {
+  try {
+    await chrome.windows.create({
+      url: chrome.runtime.getURL(`reminder.html?id=${encodeURIComponent(task.id)}`),
+      type: 'popup',
+      focused: true,
+      state: 'maximized'
+    });
+    return true;
+  } catch (err) {
+    /* The reminder still lives in attentionNeeded and on the badge, so
+       this degrades to the pre-overlay behaviour rather than vanishing. */
+    console.debug('Tasve: could not open the reminder window', err);
+    return false;
+  }
+}
+
+async function routeReminder(task) {
+  const settings = await readNotificationSettings(chrome.storage.local);
+  if (!settings.fullscreenReminders) return;
+
+  const tab = await getActiveInjectableTab();
+  if (tab) {
+    try {
+      /* Addressed to one tab, not broadcast: twenty open tabs must not
+         produce twenty overlays. */
+      await chrome.tabs.sendMessage(tab.id, { action: 'showReminderOverlay', task });
+      return;
+    } catch {
+      /* No content script yet (installed but never reloaded), or the tab
+         closed mid-flight. The window path covers both. */
+    }
+  }
+
+  await openReminderWindow(task);
+}
+
+/* Done in the overlay. A recurring ritual must not be marked complete —
+   that would kill every future water break — so it only clears the
+   attention flag and lets the already-scheduled next alarm stand. */
+async function resolveReminder(taskId) {
+  const tasks = await getTasksFromStorage();
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) return;
+
+  if (task.recurring) {
+    await clearReminderAttention(taskId);
+    broadcastMessage({ action: 'tasksUpdated' });
+    return;
+  }
+
+  await completeTask(taskId);
+}
+
 function broadcastMessage(message) {
   chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }, (tabs) => {
     if (!tabs) return;
@@ -701,10 +503,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return await lintText(request.text);
         case 'engineStatus':
           return { ready: await engineReady() };
-        case 'fixGrammar':
-          return mapBlocks(request.text || '', applyStandardRewrite);
-        case 'paraphrase':
-          return paraphraseText(request.text, request.mode);
         case 'summarize':
           return buildBriefSummary(request.content);
         case 'parseTask':
@@ -774,6 +572,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case 'completeTask':
           await completeTask(request.taskId);
           return true;
+        case 'resolveReminder':
+          await resolveReminder(request.taskId);
+          return true;
+        case 'getReminderTask': {
+          const tasks = await getTasksFromStorage();
+          const task = tasks.find((item) => item.id === request.taskId);
+          return task ? buildReminderPayload(task) : null;
+        }
         case 'acknowledgeReminders':
           if (request.taskId) {
             await clearReminderAttention(request.taskId);

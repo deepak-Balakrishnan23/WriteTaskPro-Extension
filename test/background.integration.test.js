@@ -16,6 +16,16 @@ const store = {};
 const alarms = new Map();
 const badge = {};
 
+/* Reminder routing: which tab was messaged, and whether the fallback
+   window had to be opened. `activeTab` is what chrome.tabs.query returns,
+   and sendFails simulates a tab with no content script in it yet. */
+const routing = {
+  activeTab: null,
+  sendFails: false,
+  sent: [],
+  windows: []
+};
+
 /* Records how the service worker talks to the offscreen engine host. */
 const offscreen = {
   created: [],
@@ -96,8 +106,17 @@ function stubChrome() {
       setTitle: (o) => { Object.assign(badge, o); return Promise.resolve(); }
     },
     tabs: {
-      query: (opts, callback) => resolveOrCallback([], callback),
-      sendMessage: () => Promise.resolve()
+      query: (opts, callback) => resolveOrCallback(routing.activeTab ? [routing.activeTab] : [], callback),
+      sendMessage: (tabId, message) => {
+        routing.sent.push({ tabId, message });
+        /* A tab that has never been reloaded since install has no content
+           script, and chrome rejects rather than silently dropping. */
+        if (routing.sendFails) return Promise.reject(new Error('Receiving end does not exist'));
+        return Promise.resolve();
+      }
+    },
+    windows: {
+      create: async (options) => { routing.windows.push(options); return { id: 1 }; }
     }
   };
 }
@@ -206,36 +225,30 @@ test('the humanize handler is removed', async () => {
   assert.deepEqual(response, { error: 'Unknown action' });
 });
 
-/* ── Paragraph preservation, end to end ────────────────────── */
+/* ── Generative rewriting is gone, not disabled ────────────── */
 
-test('fixGrammar preserves paragraph breaks', async () => {
-  const source = 'the first paragraph needs work.\n\nthe second paragraph should survive.';
-  const result = await send({ action: 'fixGrammar', text: source });
-  assert.ok(
-    result.includes('\n\n'),
-    `paragraph break was flattened:\n${JSON.stringify(result)}`
+test('the paraphrase handler is removed', async () => {
+  const response = await send({ action: 'paraphrase', text: 'we cannot ship this.', mode: 'rewrite' });
+  assert.deepEqual(response, { error: 'Unknown action' }, 'paraphrase should no longer exist');
+});
+
+test('the aiAvailability handler is removed', async () => {
+  assert.deepEqual(await send({ action: 'aiAvailability' }), { error: 'Unknown action' });
+});
+
+test('nothing reaches the offscreen document for an AI prompt any more', async () => {
+  offscreen.requests.length = 0;
+  await send({ action: 'summarize', content: 'Some source text worth summarizing here. It has two sentences.' });
+  assert.equal(
+    offscreen.requests.filter((r) => r.action === 'aiPrompt' || r.action === 'aiAvailability').length,
+    0,
+    'the Gemini Nano plumbing is still being called'
   );
-});
-
-test('paraphrase preserves paragraph breaks in every mode', async () => {
-  const source = 'we cannot ship this today.\n\nit is not ready for review.';
-  for (const mode of ['standard', 'formal', 'casual', 'shorten', 'expand', 'creative']) {
-    const result = await send({ action: 'paraphrase', text: source, mode });
-    assert.ok(
-      result.includes('\n\n'),
-      `mode "${mode}" flattened the paragraph break:\n${JSON.stringify(result)}`
-    );
-  }
-});
-
-test('an unknown paraphrase mode falls back instead of returning empty', async () => {
-  const result = await send({ action: 'paraphrase', text: 'we cannot ship this.', mode: 'bogus' });
-  assert.ok(result && result.length > 0, 'unknown mode produced no output');
 });
 
 /* ── The summarizer reports the real figure ────────────────── */
 
-test('summarize does not alter figures', async () => {
+test('summarize uses the extractive summarizer and does not alter figures', async () => {
   const source = [
     'Quarterly Earnings Report',
     'The company reported revenue of 4.2 billion dollars for the quarter, exceeding expectations by nine percent.',
@@ -245,10 +258,122 @@ test('summarize does not alter figures', async () => {
   assert.match(summary, /4\.2 billion/, `figure was altered:\n${summary}`);
 });
 
+/* ── Immersive reminder routing ─────────────────────────────── */
+
+/** Fires the alarm for a task that exists in storage. */
+async function fireReminder(task) {
+  routing.sent.length = 0;
+  routing.windows.length = 0;
+  store.wtp_tasks = [{ id: 'r1', title: 'Drink water', kind: 'water', completed: false, ...task }];
+  await listeners.alarm[0]({ name: `task-reminder-${task.id || 'r1'}` });
+  /* routeReminder awaits storage and tabs, so let those microtasks drain. */
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+test('a reminder goes to the active http tab, not every tab', async () => {
+  routing.activeTab = { id: 7, url: 'https://example.com/article' };
+  routing.sendFails = false;
+  await fireReminder({ id: 'r1' });
+
+  const overlayMessages = routing.sent.filter((s) => s.message.action === 'showReminderOverlay');
+  assert.equal(overlayMessages.length, 1, 'exactly one tab should be asked to show the overlay');
+  assert.equal(overlayMessages[0].tabId, 7);
+  assert.equal(routing.windows.length, 0, 'no fallback window is needed when a tab worked');
+});
+
+test('the payload carries the kind and the user wording separately', async () => {
+  routing.activeTab = { id: 7, url: 'https://example.com/' };
+  routing.sendFails = false;
+  await fireReminder({ id: 'r1', kind: 'water', title: 'Finish the 1L bottle' });
+
+  const { task } = routing.sent.find((s) => s.message.action === 'showReminderOverlay').message;
+  assert.equal(task.kind, 'water');
+  assert.equal(task.taskTitle, 'Finish the 1L bottle', 'the overlay needs the raw title for its message');
+  assert.match(task.title, /^Tasve/, 'the notification title keeps its prefix');
+});
+
+test('a chrome:// page falls back to the reminder window', async () => {
+  routing.activeTab = { id: 9, url: 'chrome://settings' };
+  routing.sendFails = false;
+  await fireReminder({ id: 'r1' });
+
+  assert.equal(routing.sent.filter((s) => s.message.action === 'showReminderOverlay').length, 0);
+  assert.equal(routing.windows.length, 1, 'an uninjectable tab must still produce a reminder');
+  assert.match(routing.windows[0].url, /reminder\.html\?id=r1/);
+  assert.equal(routing.windows[0].type, 'popup');
+});
+
+test('no open window at all falls back to the reminder window', async () => {
+  routing.activeTab = null;
+  await fireReminder({ id: 'r1' });
+  assert.equal(routing.windows.length, 1);
+});
+
+test('a tab with no content script falls back rather than losing the reminder', async () => {
+  routing.activeTab = { id: 11, url: 'https://example.com/' };
+  routing.sendFails = true;
+  await fireReminder({ id: 'r1' });
+  routing.sendFails = false;
+
+  assert.equal(routing.windows.length, 1, 'a rejected sendMessage must fall through to the window');
+});
+
+test('fullscreenReminders off restores the badge-only behaviour', async () => {
+  store.wtp_settings = { fullscreenReminders: false };
+  routing.activeTab = { id: 7, url: 'https://example.com/' };
+  await fireReminder({ id: 'r1' });
+  delete store.wtp_settings;
+
+  assert.equal(routing.sent.filter((s) => s.message.action === 'showReminderOverlay').length, 0);
+  assert.equal(routing.windows.length, 0);
+  /* The reminder itself is untouched — only its presentation changed. */
+  assert.equal(store.wtp_tasks[0].attentionNeeded, true);
+  assert.ok(badge.text, 'the badge must still report it');
+});
+
+test('the reminder is recorded before it is routed, so nothing depends on the overlay', async () => {
+  routing.activeTab = null;
+  await fireReminder({ id: 'r1' });
+  assert.equal(store.wtp_tasks[0].attentionNeeded, true);
+});
+
+/* ── Done, from the overlay ─────────────────────────────────── */
+
+test('Done completes a one-off reminder', async () => {
+  store.wtp_tasks = [{ id: 'r2', title: 'Send invoice', kind: 'task', completed: false, attentionNeeded: true }];
+  await send({ action: 'resolveReminder', taskId: 'r2' });
+  assert.equal(store.wtp_tasks[0].completed, true);
+});
+
+test('Done on a recurring ritual clears attention without killing the recurrence', async () => {
+  /* Completing a recurring water reminder would end every future one. */
+  store.wtp_tasks = [{
+    id: 'r3', title: 'Drink water', kind: 'water', completed: false,
+    attentionNeeded: true, recurring: true
+  }];
+  await send({ action: 'resolveReminder', taskId: 'r3' });
+
+  assert.equal(store.wtp_tasks[0].completed, false, 'a recurring ritual must not be completed');
+  assert.equal(store.wtp_tasks[0].attentionNeeded, false, 'but its attention flag must clear');
+});
+
+test('resolveReminder on a missing task is a no-op, not a throw', async () => {
+  store.wtp_tasks = [];
+  assert.equal(await send({ action: 'resolveReminder', taskId: 'gone' }), true);
+});
+
+test('getReminderTask returns the payload the window needs, or null', async () => {
+  store.wtp_tasks = [{ id: 'r4', title: 'Tea', kind: 'tea', completed: false }];
+  const payload = await send({ action: 'getReminderTask', taskId: 'r4' });
+  assert.equal(payload.kind, 'tea');
+  assert.equal(payload.taskTitle, 'Tea');
+  assert.equal(await send({ action: 'getReminderTask', taskId: 'nope' }), null);
+});
+
 /* ── Degenerate input on every text handler ────────────────── */
 
 test('text handlers survive empty, null and undefined input', async () => {
-  for (const action of ['checkGrammar', 'fixGrammar', 'paraphrase']) {
+  for (const action of ['checkGrammar']) {
     for (const text of ['', null, undefined, '   ']) {
       const response = await send({ action, text });
       assert.ok(

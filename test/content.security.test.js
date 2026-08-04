@@ -272,15 +272,6 @@ test('suggestions are applied through a span-scoped API', () => {
   assert.match(CODE_ONLY, /function applyIssueToField/);
 });
 
-test('the floating button is a real button, not a div', () => {
-  assert.match(
-    CODE_ONLY,
-    /createElement\('button'\)[\s\S]{0,200}wtp-fab/,
-    'the FAB must be a <button> to be reachable by keyboard'
-  );
-  assert.match(CODE_ONLY, /aria-label',\s*'Open WriteTask Pro'/);
-});
-
 test('the grammar card is reachable and dismissible by keyboard', () => {
   assert.match(CODE_ONLY, /role',\s*'dialog'/, 'card needs a dialog role');
   assert.match(CODE_ONLY, /\.focus\(\)/, 'focus must move into the card');
