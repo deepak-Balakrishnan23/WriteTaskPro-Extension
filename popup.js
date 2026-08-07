@@ -65,7 +65,37 @@
     }
   }
 
+  function hostnameFromUrl(url) {
+    try { return new URL(url).hostname; } catch { return ''; }
+  }
+
+  async function initSiteToggle() {
+    const section = document.getElementById('popup-site-section');
+    const toggle = document.getElementById('popup-site-toggle');
+    const label = document.getElementById('popup-site-label');
+    if (!section || !toggle) return;
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const host = hostnameFromUrl(tab?.url);
+      if (!host || !canInjectIntoTab(tab)) return; // not a normal page
+      section.style.display = 'block';
+      if (label) label.textContent = `Active on ${host}`;
+      const res = await chrome.storage.local.get(['wtp_disabled_sites']);
+      const disabled = res.wtp_disabled_sites || [];
+      toggle.checked = !disabled.includes(host);
+      toggle.addEventListener('change', async () => {
+        const cur = (await chrome.storage.local.get(['wtp_disabled_sites'])).wtp_disabled_sites || [];
+        let next = cur.filter((h) => h !== host);
+        if (!toggle.checked) next.push(host);
+        await chrome.storage.local.set({ wtp_disabled_sites: next });
+        if (tab?.id) chrome.tabs.reload(tab.id); // apply immediately
+        window.close();
+      });
+    } catch { /* leave hidden */ }
+  }
+
   async function init() {
+    initSiteToggle();
     try {
       const settings = await chrome.storage.local.get(['wtp_settings']);
       applyTheme(settings?.wtp_settings?.theme || 'system');

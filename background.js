@@ -12,6 +12,7 @@ chrome.runtime.onInstalled.addListener(() => {
     chrome.contextMenus.create({ id: 'writetask-paraphrase', title: 'WriteTask Pro: Paraphrase Selection', contexts: ['selection'] });
     chrome.contextMenus.create({ id: 'writetask-grammar', title: 'WriteTask Pro: Check Grammar', contexts: ['selection'] });
     chrome.contextMenus.create({ id: 'writetask-add-task', title: 'WriteTask Pro: Add as Task', contexts: ['selection'] });
+    chrome.contextMenus.create({ id: 'writetask-extract-tasks', title: 'WriteTask Pro: Extract Tasks from Selection', contexts: ['selection'] });
     chrome.contextMenus.create({ id: 'writetask-summarize', title: 'WriteTask Pro: Summarize Page', contexts: ['page'] });
   });
 
@@ -19,7 +20,8 @@ chrome.runtime.onInstalled.addListener(() => {
     if (!result.wtp_settings) {
       chrome.storage.local.set({
         wtp_settings: {
-          theme: 'system'
+          theme: 'system',
+          aiEngine: 'auto'
         }
       });
     }
@@ -34,6 +36,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === 'writetask-paraphrase') send({ action: 'contextMenuParaphrase', text: info.selectionText });
   else if (info.menuItemId === 'writetask-grammar') send({ action: 'contextMenuGrammar', text: info.selectionText });
   else if (info.menuItemId === 'writetask-add-task') send({ action: 'contextMenuAddTask', text: info.selectionText, url: info.pageUrl });
+  else if (info.menuItemId === 'writetask-extract-tasks') send({ action: 'contextMenuExtractTasks', text: info.selectionText });
   else if (info.menuItemId === 'writetask-summarize') send({ action: 'contextMenuSummarize' });
 });
 
@@ -94,57 +97,313 @@ function applyPhraseReplacements(text, replacements) {
   return result;
 }
 
-const TOKEN_CORRECTIONS = {
-  heloo: 'hello',
-  helow: 'hello',
-  helooo: 'hello',
-  heloow: 'hello',
-  heloww: 'hello',
-  heloowyou: 'hello you',
-  hellowyou: 'hello you',
-  helloyou: 'hello you',
-  wnat: 'want',
-  wnatfood: 'want food',
-  wannafood: 'want food',
-  u: 'you',
-  ur: 'your'
+/* =========================================================
+   AI Provider — Chrome Built-in AI (Gemini Nano / Prompt API)
+   with a graceful fallback to the local rules engine.
+
+   Everything is funnelled through aiProvider.run(task, text) so
+   the rest of the code never touches a vendor API directly. If the
+   on-device model is unavailable (unsupported browser, hardware not
+   ready, model still downloading, or user turned it off), run()
+   returns null and the caller uses the deterministic rules engine.
+   ========================================================= */
+
+const AI_SYSTEM_PROMPT =
+  'You are a precise writing assistant. You improve text while preserving its ' +
+  'original meaning, intent, and language. Output only the requested result — ' +
+  'no explanations, no preamble, no surrounding quotation marks or code fences.';
+
+const AI_TASK_PROMPTS = {
+  grammar: (text) =>
+    'Correct all spelling, grammar, and punctuation mistakes in the text below. ' +
+    'Keep the same meaning, tone, and language. Do not rephrase beyond what is ' +
+    `needed to fix errors. Return only the corrected text.\n\nText:\n${text}`,
+  paraphrase: (text, opts) => {
+    const instructions = {
+      standard: 'Rewrite the text below to be clearer and more natural.',
+      formal: 'Rewrite the text below in a formal, professional tone.',
+      casual: 'Rewrite the text below in a casual, friendly tone.',
+      shorten: 'Rewrite the text below to be more concise while keeping the key information.',
+      expand: 'Rewrite the text below with more detail, explanation, and context.',
+      creative: 'Rewrite the text below in a more vivid, engaging, and creative way.'
+    };
+    const mode = (opts && opts.mode) || 'standard';
+    return `${instructions[mode] || instructions.standard} Return only the rewritten text.\n\nText:\n${text}`;
+  },
+  summarize: (text) =>
+    'Summarize the text below. Start with a one-sentence overview, then add 2-3 ' +
+    'concise bullet points each starting with "• ". Return only the summary.\n\n' +
+    `Text:\n${text}`,
+  extractTasks: (text) =>
+    'Extract the action items / to-do tasks from the text below. Output one task ' +
+    'per line in short imperative form (e.g. "Email Sarah the report"). Keep any ' +
+    'due date or time that is mentioned. Do not number the lines, do not add any ' +
+    'commentary. If there are no clear tasks, output nothing.\n\n' +
+    `Text:\n${text}`,
+  tone: (text) =>
+    'Analyze the tone of the text below. On the first line, list the 1-3 dominant ' +
+    'tones as a comma-separated list (e.g. "Confident, Friendly"). On the second ' +
+    'line, write one short sentence of feedback on how it may read to the reader. ' +
+    'Return nothing else.\n\n' +
+    `Text:\n${text}`,
+  translate: (text, opts) =>
+    `Translate the text below into ${(opts && opts.lang) || 'English'}. Preserve the ` +
+    'meaning and tone. Return only the translation, with no notes or quotation marks.\n\n' +
+    `Text:\n${text}`,
+  synonyms: (text) =>
+    `List up to 6 common synonyms for the word "${text}". Return only a ` +
+    'comma-separated list of single words, no numbering and no extra commentary.',
+  complete: (text) =>
+    'Continue the text below naturally with a short completion of at most 12 words. ' +
+    'Return ONLY the continuation that should follow — do not repeat the given text, ' +
+    'do not add quotation marks.\n\n' +
+    `Text:\n${text}`
 };
 
-const SPLIT_WORDS = new Set([
-  'a', 'am', 'approve', 'approval', 'are', 'food', 'good', 'hello', 'help',
-  'holiday', 'how', 'i', 'leave', 'me', 'my', 'need', 'now', 'please',
-  'request', 'thanks', 'today', 'want', 'you', 'your'
-]);
+function cleanModelOutput(raw) {
+  let out = String(raw || '').trim();
+  if (!out) return '';
+  // Strip code fences the model may wrap around output.
+  out = out.replace(/^```[a-z]*\n?/i, '').replace(/\n?```$/i, '').trim();
+  // Strip a single pair of wrapping quotes.
+  if ((out.startsWith('"') && out.endsWith('"')) || (out.startsWith('“') && out.endsWith('”'))) {
+    out = out.slice(1, -1).trim();
+  }
+  // Drop a leading conversational preamble like "Sure, here is..." if present.
+  out = out.replace(/^(sure|certainly|here(?:'s| is)|okay|of course)[^\n:]*:\s*/i, '').trim();
+  return out;
+}
 
-function splitMergedToken(token) {
-  const lower = token.toLowerCase();
-  const length = lower.length;
-  const best = new Array(length + 1).fill(null);
-  best[0] = [];
+function withTimeout(promise, ms, label = 'AI request') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms))
+  ]);
+}
 
-  for (let i = 0; i < length; i += 1) {
-    if (!best[i]) continue;
-    for (let j = i + 1; j <= Math.min(length, i + 10); j += 1) {
-      const chunk = lower.slice(i, j);
-      if (!SPLIT_WORDS.has(chunk)) continue;
-      const candidate = [...best[i], chunk];
-      if (!best[j] || candidate.length < best[j].length) {
-        best[j] = candidate;
+const aiProvider = {
+  get supported() {
+    return typeof LanguageModel !== 'undefined';
+  },
+  _enabled: true,          // mirrors the user's "writing engine" setting
+  _unavailable: false,     // model reported unavailable on this device
+  _baseSession: null,
+  _downloading: false,
+
+  setEnabled(enabled) {
+    this._enabled = enabled !== false;
+  },
+
+  async _availability() {
+    try {
+      return await LanguageModel.availability();
+    } catch {
+      return 'unavailable';
+    }
+  },
+
+  _startBackgroundDownload() {
+    if (this._downloading || this._baseSession) return;
+    this._downloading = true;
+    LanguageModel.create({
+      initialPrompts: [{ role: 'system', content: AI_SYSTEM_PROMPT }],
+      monitor(m) {
+        m.addEventListener('downloadprogress', (e) => {
+          console.log(`WriteTask Pro: on-device model downloading ${Math.round((e.loaded || 0) * 100)}%`);
+        });
+      }
+    })
+      .then((session) => { this._baseSession = session; })
+      .catch(() => { this._unavailable = true; })
+      .finally(() => { this._downloading = false; });
+  },
+
+  async _getSession() {
+    if (!this.supported || !this._enabled || this._unavailable) return null;
+    if (this._baseSession) return this._baseSession;
+
+    const status = await this._availability();
+    if (status === 'unavailable') {
+      this._unavailable = true;
+      return null;
+    }
+    if (status === 'available') {
+      try {
+        this._baseSession = await LanguageModel.create({
+          initialPrompts: [{ role: 'system', content: AI_SYSTEM_PROMPT }]
+        });
+        return this._baseSession;
+      } catch {
+        this._unavailable = true;
+        return null;
+      }
+    }
+    // 'downloadable' / 'downloading' — fetch in the background and use the
+    // rules engine for now; the model auto-upgrades on a later request.
+    this._startBackgroundDownload();
+    return null;
+  },
+
+  async status() {
+    if (!this.supported) return { supported: false, state: 'unsupported' };
+    if (!this._enabled) return { supported: true, state: 'off' };
+    if (this._baseSession) return { supported: true, state: 'ready' };
+    if (this._downloading) return { supported: true, state: 'downloading' };
+    const availability = await this._availability();
+    return { supported: true, state: availability };
+  },
+
+  async run(task, text, opts) {
+    const source = String(text || '').trim();
+    if (!source) return null;
+
+    const buildPrompt = AI_TASK_PROMPTS[task];
+    if (!buildPrompt) return null;
+
+    const base = await this._getSession();
+    if (!base) return null;
+
+    let session = null;
+    try {
+      // Clone so each request is stateless (no accumulated context).
+      session = typeof base.clone === 'function' ? await base.clone() : base;
+      const result = await withTimeout(session.prompt(buildPrompt(source, opts)), 20000, 'On-device AI');
+      const cleaned = cleanModelOutput(result);
+      return cleaned || null;
+    } catch (err) {
+      console.warn('WriteTask Pro: AI run failed, using rules fallback —', err.message);
+      return null;
+    } finally {
+      if (session && session !== base && typeof session.destroy === 'function') {
+        try { session.destroy(); } catch { /* noop */ }
       }
     }
   }
+};
 
-  if (!best[length] || best[length].length < 2) return token;
+/* ── Word-level diff → inline suggestion spans ──
+   The AI (or the rules engine) returns a corrected full string. We diff it
+   against the original so we can surface precise character offsets for the
+   inline underlines, regardless of which engine produced the correction. */
 
-  const rebuilt = best[length]
-    .map((word, index) => {
-      if (index === 0 && token[0] === token[0]?.toUpperCase()) return titleCase(word);
-      return word;
-    })
-    .join(' ');
-
-  return rebuilt;
+function tokenizeWithOffsets(text) {
+  const tokens = [];
+  const re = /\S+|\s+/g;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    tokens.push({
+      value: match[0],
+      start: match.index,
+      end: match.index + match[0].length,
+      ws: /^\s+$/.test(match[0])
+    });
+  }
+  return tokens;
 }
+
+function lcsOps(a, b) {
+  // a, b are arrays of token value strings. Returns a list of ops:
+  // { type: 'equal'|'delete'|'insert', ai, bi }
+  const n = a.length;
+  const m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i -= 1) {
+    for (let j = m - 1; j >= 0; j -= 1) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      ops.push({ type: 'equal', ai: i, bi: j });
+      i += 1; j += 1;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: 'delete', ai: i });
+      i += 1;
+    } else {
+      ops.push({ type: 'insert', bi: j });
+      j += 1;
+    }
+  }
+  while (i < n) { ops.push({ type: 'delete', ai: i }); i += 1; }
+  while (j < m) { ops.push({ type: 'insert', bi: j }); j += 1; }
+  return ops;
+}
+
+function diffToIssues(original, corrected) {
+  const origTokens = tokenizeWithOffsets(original);
+  const corrTokens = tokenizeWithOffsets(corrected);
+  const ops = lcsOps(origTokens.map((t) => t.value), corrTokens.map((t) => t.value));
+
+  const issues = [];
+  let k = 0;
+  while (k < ops.length) {
+    if (ops[k].type === 'equal') { k += 1; continue; }
+
+    // Gather a contiguous run of non-equal ops into a single change region.
+    const deleted = [];
+    const inserted = [];
+    while (k < ops.length && ops[k].type !== 'equal') {
+      if (ops[k].type === 'delete') deleted.push(origTokens[ops[k].ai]);
+      else inserted.push(corrTokens[ops[k].bi]);
+      k += 1;
+    }
+
+    const originalText = deleted.map((t) => t.value).join('');
+    const suggestionText = inserted.map((t) => t.value).join('');
+
+    // Ignore pure-whitespace churn (e.g. collapsing double spaces handled elsewhere).
+    if (originalText.trim() === suggestionText.trim()) continue;
+
+    // We need an anchorable range in the ORIGINAL text for the underline.
+    let start;
+    let end;
+    if (deleted.length) {
+      start = deleted[0].start;
+      end = deleted[deleted.length - 1].end;
+    } else {
+      // Pure insertion: anchor onto the character before the insertion point.
+      const anchor = issues.length ? null : null;
+      // Find the original offset just after the previous equal token.
+      const prevOp = ops[k - inserted.length - 1];
+      start = prevOp && prevOp.ai != null ? origTokens[prevOp.ai].end : 0;
+      end = Math.min(original.length, start + 1);
+      void anchor;
+    }
+
+    issues.push({
+      start,
+      end,
+      original: originalText || original.slice(start, end),
+      suggestion: suggestionText,
+      rule: classifyEdit(originalText, suggestionText),
+      explanation: 'Suggested improvement for clarity and correctness.'
+    });
+  }
+
+  return issues;
+}
+
+function classifyEdit(original, suggestion) {
+  const o = original.trim();
+  const s = suggestion.trim();
+  if (!s) return 'Wordiness';
+  if (!o) return 'Missing word';
+  if (o.toLowerCase() === s.toLowerCase()) return 'Capitalization';
+  if (o.replace(/[.,!?;:'"]/g, '') === s.replace(/[.,!?;:'"]/g, '')) return 'Punctuation';
+  if (o.split(/\s+/).length === 1 && s.split(/\s+/).length === 1) return 'Spelling';
+  return 'Grammar';
+}
+
+// Small, generic informal-to-standard token fixes (rules-engine fallback only).
+const TOKEN_CORRECTIONS = {
+  ur: 'your',
+  pls: 'please',
+  plz: 'please',
+  thx: 'thanks'
+};
 
 function normalizeTokens(text) {
   return String(text || '').replace(/\b[a-zA-Z]{2,}\b/g, (token) => {
@@ -155,7 +414,7 @@ function normalizeTokens(text) {
       }
       return corrected;
     }
-    return splitMergedToken(token);
+    return token;
   });
 }
 
@@ -163,81 +422,14 @@ function applyCoreCorrections(text) {
   let result = normalizeTokens(normalizeWhitespace(text))
     .replace(/\bi am\b/gi, 'I am')
     .replace(/\bim\b/gi, "I'm")
-    .replace(/\bi\b/g, 'I')
-    .replace(/\bpls\b/gi, 'please')
-    .replace(/\bthx\b/gi, 'thanks');
+    .replace(/\bi\b/g, 'I');
 
   COMMON_REPLACEMENTS.forEach(([original, suggestion]) => {
     result = replaceWholeWord(result, original, suggestion);
   });
 
-  result = applyPhraseReplacements(result, [
-    [/\bwant holiday approve\b/gi, 'want holiday approval'],
-    [/\bneed holiday approve\b/gi, 'need holiday approval'],
-    [/\bholiday approve\b/gi, 'holiday approval'],
-    [/\bleave approve\b/gi, 'leave approval'],
-    [/\bapprove my holiday\b/gi, 'approve my holiday request'],
-    [/\bi want leave\b/gi, 'I want leave approval'],
-    [/\bi need leave\b/gi, 'I need leave approval'],
-    [/\bi want holiday\b/gi, 'I want holiday approval'],
-    [/\bi need holiday\b/gi, 'I need holiday approval'],
-    [/\bcan you approve\b/gi, 'could you approve'],
-    [/\bkindly approve\b/gi, 'please approve']
-  ]);
-
   result = cleanupSpacing(sentenceCaseText(result));
   return ensureTrailingPunctuation(result);
-}
-
-function findVerbProblem(text) {
-  const source = normalizeWhitespace(text);
-  if (!source) return null;
-
-  const patterns = [
-    {
-      regex: /\b(want|need)\s+leave\b/i,
-      replacement: (match, verb) => `${verb} to leave`,
-      suggestion: 'to leave',
-      explanation: 'This verb usually needs “to” before the next verb.'
-    },
-    {
-      regex: /\b(want|need)\s+go\b/i,
-      replacement: (match, verb) => `${verb} to go`,
-      suggestion: 'to go',
-      explanation: 'This verb usually needs “to” before the next verb.'
-    },
-    {
-      regex: /\b(want|need)\s+take\s+leave\b/i,
-      replacement: (match, verb) => `${verb} to take leave`,
-      suggestion: 'to take leave',
-      explanation: 'This phrase reads more naturally with “to take leave.”'
-    },
-    {
-      regex: /\b(want|need)\s+holiday\b/i,
-      replacement: (match, verb) => `${verb} a holiday`,
-      suggestion: 'a holiday',
-      explanation: 'This noun phrase usually needs an article.'
-    }
-  ];
-
-  for (const pattern of patterns) {
-    const match = source.match(pattern.regex);
-    if (!match) continue;
-
-    const correctedSentence = ensureTrailingPunctuation(
-      cleanupSpacing(sentenceCaseText(source.replace(pattern.regex, pattern.replacement)))
-    );
-
-    return {
-      original: match[0],
-      suggestion: pattern.suggestion,
-      replacement: correctedSentence,
-      rule: 'Verb problem',
-      explanation: pattern.explanation
-    };
-  }
-
-  return null;
 }
 
 const COMMON_REPLACEMENTS = [
@@ -256,103 +448,70 @@ const COMMON_REPLACEMENTS = [
   ['im', "I'm", 'Capitalization', 'Capitalize the pronoun and add the apostrophe.']
 ];
 
-function checkGrammar(text) {
-  const errors = [];
+// ── Custom dictionary (words the user marked as correct) ──
+let dictionaryCache = null;
+
+async function getDictionary() {
+  if (dictionaryCache) return dictionaryCache;
+  const res = await chrome.storage.local.get(['wtp_dictionary']);
+  dictionaryCache = new Set((res.wtp_dictionary || []).map((w) => String(w).toLowerCase()));
+  return dictionaryCache;
+}
+
+async function addDictionaryWord(word) {
+  const w = String(word || '').trim().toLowerCase();
+  const res = await chrome.storage.local.get(['wtp_dictionary']);
+  const list = res.wtp_dictionary || [];
+  if (w && !list.some((x) => String(x).toLowerCase() === w)) list.push(w);
+  await chrome.storage.local.set({ wtp_dictionary: list });
+  dictionaryCache = new Set(list.map((x) => String(x).toLowerCase()));
+  return list;
+}
+
+async function removeDictionaryWord(word) {
+  const w = String(word || '').trim().toLowerCase();
+  const res = await chrome.storage.local.get(['wtp_dictionary']);
+  const list = (res.wtp_dictionary || []).filter((x) => String(x).toLowerCase() !== w);
+  await chrome.storage.local.set({ wtp_dictionary: list });
+  dictionaryCache = new Set(list.map((x) => String(x).toLowerCase()));
+  return list;
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.wtp_dictionary) {
+    dictionaryCache = new Set((changes.wtp_dictionary.newValue || []).map((w) => String(w).toLowerCase()));
+  }
+});
+
+// Full-text correction: on-device AI when available, rules engine otherwise.
+async function correctText(text) {
+  const ai = await aiProvider.run('grammar', text);
+  if (ai != null) return ai;
+  return applyStandardRewrite(text);
+}
+
+// Returns inline suggestion spans (with character offsets) for the given text.
+async function checkGrammar(text) {
   const rawText = text || '';
-  const trimmed = rawText.trim();
-  const correctedText = applyStandardRewrite(rawText);
+  if (!rawText.trim()) return [];
 
-  if (!trimmed) return [];
+  const corrected = await correctText(rawText);
+  if (!corrected || cleanupSpacing(corrected) === cleanupSpacing(rawText)) return [];
 
-  const verbProblem = findVerbProblem(rawText);
-  if (verbProblem) {
-    errors.push(verbProblem);
-  }
+  let issues = diffToIssues(rawText, corrected);
 
-  const repeatedWords = rawText.match(/\b(\w+)\s+\1\b/gi) || [];
-  repeatedWords.forEach((match) => {
-    const word = match.split(/\s+/)[0];
-    errors.push({
-      original: match,
-      suggestion: word,
-      rule: 'Repeated word',
-      explanation: 'The same word appears twice in a row.'
-    });
-  });
-
-  if (/\s{2,}/.test(rawText)) {
-    errors.push({
-      original: 'Multiple spaces',
-      suggestion: 'Use a single space',
-      rule: 'Spacing',
-      explanation: 'Extra spaces make text harder to read and can break formatting.'
+  // Skip single words the user added to their personal dictionary.
+  const dict = await getDictionary();
+  if (dict.size) {
+    issues = issues.filter((i) => {
+      const o = (i.original || '').trim().toLowerCase();
+      return !(o && !/\s/.test(o) && dict.has(o));
     });
   }
+  if (!issues.length) return [];
 
-  const sentences = splitSentences(rawText);
-  sentences.forEach((sentence) => {
-    const firstLetter = sentence.match(/[A-Za-z]/);
-    if (firstLetter) {
-      const ch = firstLetter[0];
-      if (ch === ch.toLowerCase()) {
-        errors.push({
-          original: sentence.slice(0, Math.min(sentence.length, 40)),
-          suggestion: titleCase(sentence),
-          rule: 'Capitalization',
-          explanation: 'Sentences should usually begin with a capital letter.'
-        });
-      }
-    }
-
-    if (!/[.!?]["')\]]?$/.test(sentence) && sentence.split(' ').length > 3) {
-      errors.push({
-        original: sentence.slice(0, Math.min(sentence.length, 40)),
-        suggestion: `${sentence}.`,
-        rule: 'Punctuation',
-        explanation: 'This sentence appears to be missing end punctuation.'
-      });
-    }
-  });
-
-  if (/\bi\b/.test(rawText)) {
-    errors.push({
-      original: 'i',
-      suggestion: 'I',
-      rule: 'Capitalization',
-      explanation: 'The pronoun “I” should always be capitalized.'
-    });
-  }
-
-  COMMON_REPLACEMENTS.forEach(([original, suggestion, rule, explanation]) => {
-    const regex = new RegExp(`\\b${escapeRegExp(original)}\\b`, 'i');
-    if (regex.test(rawText)) {
-      errors.push({ original, suggestion, rule, explanation });
-    }
-  });
-
-  if (/\b(very|really|actually|basically|literally)\b/gi.test(rawText)) {
-    errors.push({
-      original: 'Filler words',
-      suggestion: 'Trim unnecessary intensifiers',
-      rule: 'Clarity',
-      explanation: 'Words like “very” or “actually” can weaken concise writing.'
-    });
-  }
-
-  if (
-    correctedText &&
-    cleanupSpacing(rawText) !== cleanupSpacing(correctedText) &&
-    !verbProblem
-  ) {
-    errors.unshift({
-      original: rawText,
-      suggestion: correctedText,
-      rule: 'Suggested correction',
-      explanation: 'A stronger local correction was generated for the full sentence.'
-    });
-  }
-
-  return errors.slice(0, 12);
+  // Attach the full corrected text so callers can offer a one-click "fix all".
+  return issues.slice(0, 25).map((issue) => ({ ...issue, fullCorrection: corrected }));
 }
 
 function applyStandardRewrite(text) {
@@ -384,10 +543,6 @@ function applyStandardRewrite(text) {
     [/\bI want take leave\b/gi, 'I want to take leave'],
     [/\bI need take leave\b/gi, 'I need to take leave']
   ]);
-  result = result.replace(/\bI want holiday approval\b/i, 'I want my holiday approved');
-  result = result.replace(/\bI need holiday approval\b/i, 'I need my holiday approved');
-  result = result.replace(/\bI want leave approval\b/i, 'I want my leave approved');
-  result = result.replace(/\bI need leave approval\b/i, 'I need my leave approved');
   return ensureTrailingPunctuation(result);
 }
 
@@ -410,13 +565,6 @@ function applyFormalRewrite(text) {
     result = replaceWholeWord(result, from, to);
   });
 
-  result = applyPhraseReplacements(result, [
-    [/\bI want my holiday approved\b/i, 'I would like to request approval for my holiday'],
-    [/\bI need my holiday approved\b/i, 'I would like to request approval for my holiday'],
-    [/\bI want my leave approved\b/i, 'I would like to request approval for my leave'],
-    [/\bI need my leave approved\b/i, 'I would like to request approval for my leave']
-  ]);
-
   return ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(result)));
 }
 
@@ -433,13 +581,6 @@ function applyCasualRewrite(text) {
   ].forEach(([from, to]) => {
     result = replaceWholeWord(result, from, to);
   });
-
-  result = applyPhraseReplacements(result, [
-    [/\bI want my holiday approved\b/i, "I'd like my holiday approved"],
-    [/\bI need my holiday approved\b/i, "I'd like my holiday approved"],
-    [/\bI want my leave approved\b/i, "I'd like my leave approved"],
-    [/\bI need my leave approved\b/i, "I'd like my leave approved"]
-  ]);
 
   return ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(result)));
 }
@@ -476,9 +617,12 @@ function applyCreativeRewrite(text) {
     .join(' ');
 }
 
-function paraphraseText(text, mode = 'standard') {
+async function paraphraseText(text, mode = 'standard') {
   const source = text || '';
   if (!source.trim()) return '';
+
+  const ai = await aiProvider.run('paraphrase', source, { mode });
+  if (ai != null) return ai;
 
   switch (mode) {
     case 'formal':
@@ -833,11 +977,20 @@ function buildBriefSummary(content) {
   return [intro, ...bullets].join('\n');
 }
 
-function getWritingScore(text) {
+// On-device AI summary when available, extractive rules summary otherwise.
+async function summarizeText(content) {
+  const source = String(content || '').trim();
+  if (!source) return 'No readable content found.';
+  const ai = await aiProvider.run('summarize', source);
+  if (ai != null) return ai;
+  return buildBriefSummary(source);
+}
+
+async function getWritingScore(text) {
   const source = text || '';
   const words = source.match(/\b[\w']+\b/g) || [];
   const sentences = splitSentences(source);
-  const grammarIssues = checkGrammar(source).length;
+  const grammarIssues = (await checkGrammar(source)).length;
   const avgSentenceLength = sentences.length ? words.length / sentences.length : words.length;
   const longSentencePenalty = avgSentenceLength > 24 ? 12 : avgSentenceLength > 18 ? 6 : 0;
   const shortSentenceBonus = avgSentenceLength >= 8 && avgSentenceLength <= 18 ? 6 : 0;
@@ -854,6 +1007,188 @@ function getWritingScore(text) {
   else if (engagement < 70) feedback = 'Stronger verbs and more direct phrasing would make this more engaging.';
 
   return { overall, grammar, clarity, engagement, feedback };
+}
+
+// ── Tone detection ──
+const TONE_EMOJI = {
+  Neutral: '😐', Friendly: '🙂', Formal: '🎩', Casual: '😎', Confident: '💪',
+  Tentative: '🤔', Urgent: '⏰', Polite: '🙏', Excited: '🎉', Assertive: '📣',
+  Positive: '✨', Negative: '⚠️', Apologetic: '😔', Analytical: '📊'
+};
+
+function labelToTone(label) {
+  return { label, emoji: TONE_EMOJI[label] || '🗨️' };
+}
+
+function detectToneRules(text) {
+  const t = String(text || '');
+  const lower = t.toLowerCase();
+  const scores = {};
+  const bump = (k, n = 1) => { scores[k] = (scores[k] || 0) + n; };
+
+  const excl = (t.match(/!/g) || []).length;
+  if (excl) bump('Excited', excl);
+  if (/\b(please|thank you|thanks|kindly|appreciate|grateful)\b/.test(lower)) bump('Polite', 2);
+  if (/\b(asap|urgent|immediately|deadline|right away|by (?:today|tomorrow|eod))\b/.test(lower)) bump('Urgent', 2);
+  if (/\b(i think|maybe|perhaps|might|possibly|not sure|hopefully|kind of|sort of|i guess)\b/.test(lower)) bump('Tentative', 2);
+  if (/\b(will|must|need to|ensure|guarantee|definitely|clearly|certainly|confident|absolutely)\b/.test(lower)) bump('Confident', 2);
+  const contractions = (lower.match(/\b\w+'(?:s|re|ll|ve|d|t|m)\b/g) || []).length;
+  if (contractions || /\b(hey|yeah|gonna|wanna|cool|awesome|stuff|okay|ok)\b/.test(lower)) bump('Casual', 1 + contractions);
+  if (/\b(therefore|however|furthermore|regarding|pursuant|hereby|accordingly|respectfully|sincerely)\b/.test(lower)) bump('Formal', 2);
+  if (/\b(sorry|apolog|unfortunately|regret)\b/.test(lower)) bump('Apologetic', 2);
+  const caps = (t.match(/\b[A-Z]{3,}\b/g) || []).length;
+  if (caps) bump('Assertive', caps);
+  if (/\b(great|love|excellent|fantastic|wonderful|glad|happy|excited|awesome|perfect)\b/.test(lower)) bump('Positive', 2);
+  if (/\b(no|not|never|won'?t|can'?t|refuse|reject|bad|wrong|fail|problem|issue|concern)\b/.test(lower)) bump('Negative', 1);
+
+  let tones = Object.entries(scores).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k);
+  if (!tones.length) tones = ['Neutral'];
+
+  let feedback = `Reads as ${tones.join(', ').toLowerCase()}.`;
+  if (tones.includes('Tentative')) {
+    feedback = 'Sounds tentative — trimming hedges like "maybe" or "I think" would read more confidently.';
+  } else if (tones.includes('Assertive')) {
+    feedback = 'The ALL-CAPS words read as shouting — normal case would feel calmer.';
+  } else if (tones.includes('Urgent') && !tones.includes('Polite')) {
+    feedback = 'Direct and urgent — a courteous line can soften the ask.';
+  } else if (tones.includes('Negative') && !tones.includes('Polite')) {
+    feedback = 'Leans negative — softening the wording may land better.';
+  }
+
+  return { tones: tones.map(labelToTone), feedback };
+}
+
+function parseToneOutput(raw) {
+  const lines = String(raw || '').split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return detectToneRules('');
+  const labels = lines[0]
+    .replace(/^tones?\s*:?\s*/i, '')
+    .split(/[,/]| and /i)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase());
+  const tones = (labels.length ? labels : ['Neutral']).map(labelToTone);
+  const feedback = lines.slice(1).join(' ') || `Reads as ${labels.join(', ').toLowerCase() || 'neutral'}.`;
+  return { tones, feedback };
+}
+
+async function detectTone(text) {
+  const source = String(text || '').trim();
+  if (!source) return { tones: [], feedback: 'Enter some text to check its tone.' };
+  const ai = await aiProvider.run('tone', source);
+  if (ai != null) return parseToneOutput(ai);
+  return detectToneRules(source);
+}
+
+// ── Readability (Flesch–Kincaid) ──
+function countSyllables(word) {
+  let w = String(word || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (!w) return 0;
+  if (w.length <= 3) return 1;
+  w = w.replace(/(?:[^laeiouy]es|ed|[^laeiouy]e)$/, '').replace(/^y/, '');
+  const groups = w.match(/[aeiouy]{1,2}/g);
+  return groups ? groups.length : 1;
+}
+
+const PASSIVE_RE = /\b(?:am|is|are|was|were|be|been|being)\s+(?:\w+ed|written|done|made|said|seen|taken|given|known|found|held|kept|built|sent|shown|born|paid|told|left|felt|met|led|read|set|put|cut|run|won|begun|chosen|driven|eaten|fallen|forgotten|gotten|hidden|spoken|stolen|broken|drawn|grown|thrown|worn)\b/gi;
+
+function analyzeReadability(text) {
+  const src = String(text || '');
+  const words = src.match(/\b[\w']+\b/g) || [];
+  const sentences = splitSentences(src).filter((s) => s.trim());
+  const wc = words.length;
+  if (!wc) {
+    return { grade: 0, readingEase: 0, level: '—', passivePct: 0, avgSentenceLen: 0, longSentences: 0, adverbs: 0, feedback: 'Enter some text to analyze.' };
+  }
+  const sc = Math.max(1, sentences.length);
+  const syllables = words.reduce((a, w) => a + countSyllables(w), 0);
+  const wps = wc / sc;
+  const spw = syllables / wc;
+  const readingEase = Math.max(0, Math.min(100, Math.round(206.835 - 1.015 * wps - 84.6 * spw)));
+  const grade = Math.max(0, Math.round((0.39 * wps + 11.8 * spw - 15.59) * 10) / 10);
+  const passiveCount = (src.match(PASSIVE_RE) || []).length;
+  const passivePct = Math.min(100, Math.round((passiveCount / sc) * 100));
+  const longSentences = sentences.filter((s) => (s.match(/\b[\w']+\b/g) || []).length > 24).length;
+  const adverbs = (src.match(/\b\w+ly\b/gi) || []).length;
+  const level = readingEase >= 80 ? 'Very easy' : readingEase >= 60 ? 'Easy' : readingEase >= 45 ? 'Fairly hard' : readingEase >= 30 ? 'Hard' : 'Very hard';
+
+  let feedback = 'Clear and readable.';
+  if (longSentences) feedback = `${longSentences} long sentence${longSentences > 1 ? 's' : ''} (24+ words) — splitting them improves clarity.`;
+  else if (passivePct >= 25) feedback = `${passivePct}% passive voice — active voice reads stronger.`;
+  else if (grade > 12) feedback = 'Dense wording — simpler words would lower the reading grade.';
+
+  return { grade, readingEase, level, passivePct, avgSentenceLen: Math.round(wps * 10) / 10, longSentences, adverbs, feedback };
+}
+
+// ── Translation (on-device AI; no rules fallback) ──
+const LANG_NAMES = {
+  es: 'Spanish', fr: 'French', de: 'German', ja: 'Japanese', en: 'English',
+  hi: 'Hindi', zh: 'Chinese', ar: 'Arabic', pt: 'Portuguese', it: 'Italian', ru: 'Russian', ko: 'Korean'
+};
+
+async function translateText(text, target) {
+  const source = String(text || '').trim();
+  if (!source) return { ok: false, error: 'Enter some text to translate.' };
+  const lang = LANG_NAMES[target] || target || 'English';
+  const ai = await aiProvider.run('translate', source, { lang });
+  if (ai != null) return { ok: true, text: ai, lang };
+  return { ok: false, error: 'On-device AI is needed for translation. Turn it on in Settings, or use a Chrome version with built-in AI.' };
+}
+
+// ── Synonyms (AI + small built-in fallback) ──
+const SYNONYM_MAP = {
+  good: ['great', 'excellent', 'fine', 'solid', 'strong'],
+  bad: ['poor', 'subpar', 'weak', 'flawed', 'lousy'],
+  big: ['large', 'huge', 'sizable', 'massive', 'vast'],
+  small: ['tiny', 'little', 'compact', 'minor', 'slight'],
+  happy: ['glad', 'pleased', 'content', 'cheerful', 'delighted'],
+  sad: ['unhappy', 'down', 'gloomy', 'dejected'],
+  important: ['key', 'crucial', 'vital', 'significant', 'essential'],
+  help: ['assist', 'aid', 'support', 'guide'],
+  use: ['utilize', 'employ', 'apply', 'leverage'],
+  make: ['create', 'build', 'produce', 'form'],
+  fast: ['quick', 'rapid', 'swift', 'speedy'],
+  slow: ['sluggish', 'gradual', 'leisurely'],
+  said: ['stated', 'noted', 'mentioned', 'remarked', 'explained'],
+  very: ['extremely', 'highly', 'remarkably', 'especially'],
+  get: ['obtain', 'acquire', 'receive', 'gain'],
+  show: ['display', 'reveal', 'demonstrate', 'present'],
+  think: ['believe', 'consider', 'reckon', 'suppose'],
+  new: ['fresh', 'novel', 'recent', 'modern'],
+  old: ['aged', 'former', 'dated', 'vintage'],
+  hard: ['difficult', 'tough', 'challenging', 'demanding'],
+  easy: ['simple', 'effortless', 'straightforward'],
+  nice: ['pleasant', 'lovely', 'agreeable', 'kind'],
+  want: ['wish', 'desire', 'need', 'crave'],
+  start: ['begin', 'launch', 'initiate', 'kick off'],
+  end: ['finish', 'conclude', 'complete', 'wrap up']
+};
+
+async function getSynonyms(word) {
+  const w = String(word || '').trim();
+  if (!w || /\s/.test(w)) return [];
+  const ai = await aiProvider.run('synonyms', w);
+  if (ai != null) {
+    return ai.split(/[,\n]/)
+      .map((s) => s.replace(/^[\s\-*\d.)]+/, '').trim())
+      .filter(Boolean)
+      .filter((s) => s.toLowerCase() !== w.toLowerCase())
+      .slice(0, 6);
+  }
+  return (SYNONYM_MAP[w.toLowerCase()] || []).slice(0, 6);
+}
+
+// ── Sentence completion (autocomplete; AI only) ──
+async function completeText(text) {
+  const source = String(text || '');
+  if (source.trim().length < 12) return '';
+  const ai = await aiProvider.run('complete', source.slice(-600));
+  if (ai == null) return '';
+  // Model must only return the continuation; keep it short and single-line.
+  let out = ai.split('\n')[0].trim();
+  if (out.toLowerCase().startsWith(source.trim().slice(-40).toLowerCase())) out = '';
+  return out.slice(0, 120);
 }
 
 function parseDateKeyword(lower) {
@@ -938,16 +1273,51 @@ function parseLabels(text) {
   return Array.from(new Set((text.match(/#([a-z0-9_-]+)/gi) || []).map((item) => item.slice(1))));
 }
 
+// Combine a parsed date (YYYY-MM-DD) and time (HH:MM) into a reminder ISO string.
+function buildReminderFromParts(dateStr, timeStr) {
+  if (!dateStr && !timeStr) return null;
+  const base = dateStr ? new Date(`${dateStr}T00:00:00`) : new Date();
+  if (Number.isNaN(base.getTime())) return null;
+
+  if (timeStr) {
+    const [hour, minute] = timeStr.split(':').map(Number);
+    base.setHours(hour, minute, 0, 0);
+  } else {
+    base.setHours(9, 0, 0, 0); // default to 9:00 AM when only a date is given
+  }
+
+  // If only a time-of-day was given and it already passed today, roll to tomorrow.
+  if (!dateStr && timeStr && base.getTime() <= Date.now()) {
+    base.setDate(base.getDate() + 1);
+  }
+
+  return base.toISOString();
+}
+
 function parseNaturalLanguageTask(text) {
   const source = normalizeWhitespace(text || '');
   const lower = source.toLowerCase();
   const labels = parseLabels(source);
   const priority = parsePriority(lower);
+  const dueDate = parseDateKeyword(lower);
+  const dueTime = parseTimeKeyword(lower);
+  const recurring = parseRecurring(lower);
+
+  let reminderAt = buildReminderFromParts(dueDate, dueTime);
+  // A recurring task with no explicit time still needs a first fire time.
+  if (!reminderAt && recurring) {
+    reminderAt = buildReminderFromParts(null, '09:00');
+  }
 
   let title = source
     .replace(/#([a-z0-9_-]+)/gi, '')
-    .replace(/\b(today|tomorrow|tonight|daily|weekly|monthly|every day|every week|every month|urgent|important|asap|p1|p2|p3|p4)\b/gi, '')
+    .replace(/\bin \d+\s+(?:days?|weeks?|months?)\b/gi, '')
+    .replace(/\bevery\s+\d+\s+(?:days?|weeks?|months?)\b/gi, '')
+    .replace(/\b(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi, '')
+    .replace(/\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/gi, '')
+    .replace(/\b(today|tomorrow|tonight|morning|afternoon|evening|daily|weekly|monthly|every day|every week|every month|urgent|critical|important|asap|p1|p2|p3|p4|high priority|medium)\b/gi, '')
     .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.!?])/g, '$1')
     .trim();
 
   if (!title) title = source;
@@ -958,8 +1328,87 @@ function parseNaturalLanguageTask(text) {
     description: null,
     priority,
     labels,
-    recurring: null
+    recurring,
+    dueDate,
+    dueTime,
+    reminderAt
   };
+}
+
+// ── Extract action items from arbitrary text (emails, notes, docs) ──
+
+const ACTION_CUE_RE = /\b(need to|needs to|have to|has to|must|should|to-?do|follow[- ]?up|remember to|don'?t forget|make sure|please|action item|assign(?:ed)?|deadline|due|schedule|send|email|call|review|prepare|book|submit|fix|update|create|draft|confirm|order|pay|sign|deliver|finish|complete|set up|arrange|contact|reply|respond)\b/i;
+const IMPERATIVE_START_RE = /^(send|email|call|review|prepare|book|submit|fix|update|create|draft|confirm|order|pay|sign|deliver|finish|complete|schedule|arrange|contact|reply|respond|buy|write|check|plan|set|add|remove|ask|tell|remind|follow|build|test|deploy|research|read|share|invite|renew|cancel|approve)\b/i;
+
+function extractActionItemsRules(text) {
+  const src = String(text || '');
+  const out = [];
+
+  // 1. Explicit bullet / numbered / checkbox lines.
+  src.split(/\n+/).forEach((line) => {
+    const l = line.trim();
+    if (l && /^([-*••]|\[\s?\]|\d+[.)])\s+/.test(l)) out.push(l);
+  });
+
+  // 2. Sentences that start with an imperative verb or carry an action cue.
+  const sentences = src.replace(/[ \t]+/g, ' ').match(/[^.!?\n]+[.!?]?/g) || [];
+  sentences.forEach((s) => {
+    const t = s.trim();
+    if (t.length >= 4 && (IMPERATIVE_START_RE.test(t) || ACTION_CUE_RE.test(t))) out.push(t);
+  });
+
+  return out;
+}
+
+function tidyTaskTitle(title) {
+  let t = String(title || '')
+    .replace(/^(please|also|and|kindly|then)\s+/i, '')
+    .replace(/^(we|i|you|they)\s+(need to|needs to|have to|has to|must|should|want to)\s+/i, '')
+    .replace(/^(remember to|don'?t forget to|make sure to|need to|have to|to)\s+/i, '')
+    .replace(/\s+(by|on|at|for|to|before|until)\s*[.,]?$/i, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[\s,.!]+$/, '')
+    .trim();
+  if (!t) t = String(title || '').trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+async function extractTasks(text) {
+  const source = String(text || '').trim();
+  if (!source) return [];
+
+  const ai = await aiProvider.run('extractTasks', source);
+  const rawLines = ai != null ? ai.split(/\n+/) : extractActionItemsRules(source);
+
+  const items = [];
+  const seen = new Set();
+  for (const raw of rawLines) {
+    // Strip list markers/checkboxes the model or source may include.
+    const clean = String(raw || '')
+      .replace(/^[\s\-*••\d.)\]]+/, '')
+      .replace(/^\[\s?[xX]?\s?\]\s*/, '')
+      .trim();
+    if (clean.length < 3) continue;
+
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const parsed = parseNaturalLanguageTask(clean);
+    items.push({
+      title: tidyTaskTitle(parsed.title),
+      raw: clean,
+      priority: parsed.priority,
+      labels: parsed.labels,
+      dueDate: parsed.dueDate,
+      dueTime: parsed.dueTime,
+      reminderAt: parsed.reminderAt,
+      recurring: parsed.recurring
+    });
+    if (items.length >= 25) break;
+  }
+
+  return items;
 }
 
 function addMinutes(date, minutes) {
@@ -1016,11 +1465,32 @@ function buildTaskSchedule(taskInput, fromDate = new Date()) {
   };
 }
 
+function addPeriod(date, pattern, interval) {
+  const next = new Date(date);
+  if (pattern === 'daily') next.setDate(next.getDate() + interval);
+  else if (pattern === 'weekly') next.setDate(next.getDate() + 7 * interval);
+  else if (pattern === 'monthly') next.setMonth(next.getMonth() + interval);
+  return next;
+}
+
 function getNextRecurringReminder(task, fromDate = new Date()) {
   if (!task.recurring) return null;
 
   if (task.recurring.pattern === 'interval') {
     return addMinutes(fromDate, task.recurring.intervalMinutes || task.durationMinutes || 30);
+  }
+
+  // Calendar recurrence from natural-language input (e.g. "every day", "weekly").
+  if (['daily', 'weekly', 'monthly'].includes(task.recurring.pattern)) {
+    const interval = task.recurring.interval || 1;
+    let next = task.reminderAt ? new Date(task.reminderAt) : new Date(fromDate);
+    if (Number.isNaN(next.getTime())) next = new Date(fromDate);
+    let guard = 0;
+    while (next.getTime() <= fromDate.getTime() && guard < 1000) {
+      next = addPeriod(next, task.recurring.pattern, interval);
+      guard += 1;
+    }
+    return next;
   }
 
   if (task.recurring.pattern === 'slots') {
@@ -1073,6 +1543,46 @@ function buildReminderPayload(task) {
   };
 }
 
+// Fire a real OS notification (survives when the tab/sidebar isn't focused).
+function showOsNotification(task) {
+  try {
+    const payload = buildReminderPayload(task);
+    chrome.notifications.create(`reminder-${task.id}`, {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+      title: payload.title,
+      message: payload.message,
+      priority: 2,
+      requireInteraction: true,
+      buttons: [
+        { title: task.kind === 'task' ? 'Mark done' : 'Got it' },
+        { title: 'Snooze 15m' }
+      ]
+    });
+  } catch { /* notifications unavailable */ }
+}
+
+chrome.notifications.onButtonClicked.addListener(async (id, idx) => {
+  if (!id.startsWith('reminder-')) return;
+  const taskId = id.replace('reminder-', '');
+  chrome.notifications.clear(id);
+  try {
+    if (idx === 1) { await extendTaskReminder(taskId, 15); return; }
+    const tasks = await getTasksFromStorage();
+    const task = tasks.find((t) => t.id === taskId);
+    if (!task) return;
+    if (task.kind === 'task') await completeTask(taskId);
+    else await clearReminderAttention(taskId);
+  } catch { /* noop */ }
+});
+
+chrome.notifications.onClicked.addListener(async (id) => {
+  if (!id.startsWith('reminder-')) return;
+  const taskId = id.replace('reminder-', '');
+  chrome.notifications.clear(id);
+  try { await clearReminderAttention(taskId); } catch { /* noop */ }
+});
+
 async function updateActionBadge(tasksInput = null) {
   const tasks = tasksInput || await getTasksFromStorage();
   const readyTasks = tasks.filter((task) => !task.completed && task.attentionNeeded);
@@ -1115,6 +1625,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         await saveTasksToStorage(tasks);
         await updateActionBadge(tasks);
         broadcastMessage({ action: 'reminderTriggered', task: reminderPayload });
+        showOsNotification(task);
         if (task.recurring) {
           const nextReminder = getNextRecurringReminder(task, new Date());
           if (nextReminder) {
@@ -1194,25 +1705,55 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case 'checkGrammar':
           return checkGrammar(request.text);
         case 'fixGrammar':
-          return applyStandardRewrite(request.text);
+          return correctText(request.text);
         case 'paraphrase':
           return paraphraseText(request.text, request.mode);
         case 'analyzeHumanizeText':
           return analyzeAndHumanizeText(request.text);
         case 'summarize':
-          return buildBriefSummary(request.content);
+          return summarizeText(request.content);
         case 'writingScore':
           return getWritingScore(request.text);
+        case 'detectTone':
+          return detectTone(request.text);
+        case 'readability':
+          return analyzeReadability(request.text);
+        case 'translate':
+          return translateText(request.text, request.target);
+        case 'synonyms':
+          return getSynonyms(request.word);
+        case 'complete':
+          return completeText(request.text);
+        case 'getDictionary': {
+          const res = await chrome.storage.local.get(['wtp_dictionary']);
+          return res.wtp_dictionary || [];
+        }
+        case 'addDictionaryWord':
+          return addDictionaryWord(request.word);
+        case 'removeDictionaryWord':
+          return removeDictionaryWord(request.word);
+        case 'aiStatus':
+          return aiProvider.status();
+        case 'setAiEnabled':
+          aiProvider.setEnabled(request.enabled);
+          return aiProvider.status();
         case 'parseTask':
           return parseNaturalLanguageTask(request.text);
+        case 'extractTasks':
+          return extractTasks(request.text);
         case 'createTask': {
           const tasks = await getTasksFromStorage();
           const schedule = buildTaskSchedule(request.task, new Date());
+          // Prefer a reminder/recurrence parsed from natural language
+          // (e.g. "email Sam tomorrow 3pm", "water #health every day").
+          const reminderAt = request.task.reminderAt || schedule.reminderAt;
+          const recurring = request.task.recurring || schedule.recurring;
+          const recurrenceMode = request.task.recurring ? 'recurring' : (request.task.recurrenceMode || 'once');
           const task = {
             id: 'task_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
             title: request.task.title,
             description: request.task.description || '',
-            reminderAt: schedule.reminderAt,
+            reminderAt,
             durationMinutes: schedule.durationMinutes,
             kind: request.task.kind || 'task',
             timeSlot: schedule.timeSlot,
@@ -1220,8 +1761,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             labels: request.task.labels || [],
             project: request.task.project || 'Inbox',
             subtasks: request.task.subtasks || [],
-            recurring: schedule.recurring,
-            recurrenceMode: request.task.recurrenceMode || 'once',
+            recurring,
+            recurrenceMode,
             status: 'todo',
             completed: false,
             completedAt: null,
@@ -1277,6 +1818,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return true;
         case 'getTasks':
           return getTasksFromStorage();
+        case 'rescheduleAll': {
+          const tasks = await getTasksFromStorage();
+          tasks.forEach((t) => { if (!t.completed) scheduleTaskReminder(t); });
+          await updateActionBadge(tasks);
+          broadcastMessage({ action: 'tasksUpdated' });
+          return true;
+        }
         default:
           return { error: 'Unknown action' };
       }
@@ -1290,3 +1838,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 updateActionBadge().catch(() => {});
+
+// Apply the saved "writing engine" preference (Auto on-device AI vs. Rules only).
+chrome.storage.local.get(['wtp_settings'])
+  .then((res) => {
+    const engine = res?.wtp_settings?.aiEngine;
+    aiProvider.setEnabled(engine !== 'off');
+  })
+  .catch(() => {});

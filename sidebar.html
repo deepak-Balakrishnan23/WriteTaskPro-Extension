@@ -47,6 +47,25 @@
         <button id="btn-paraphrase" class="action-btn primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg> Improve</button>
         <button id="btn-grammar" class="action-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Fix Grammar</button>
         <button id="btn-summarize" class="action-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="21" y1="10" x2="3" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="3" y2="18"/></svg> Summarize</button>
+        <button id="btn-tone" class="action-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Check Tone</button>
+        <button id="btn-readability" class="action-btn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 15l3-4 3 2 4-6"/></svg> Readability</button>
+      </div>
+      <div class="section translate-row">
+        <label class="section-label">Translate</label>
+        <div class="translate-group">
+          <select id="translate-lang">
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+            <option value="ja">Japanese</option>
+            <option value="en">English</option>
+            <option value="hi">Hindi</option>
+            <option value="zh">Chinese</option>
+            <option value="ar">Arabic</option>
+            <option value="pt">Portuguese</option>
+          </select>
+          <button id="btn-translate" class="action-btn">Translate</button>
+        </div>
       </div>
       <div id="write-result" class="result-area" style="display:none;">
         <div class="result-header"><div class="result-heading"><span class="result-label">Result</span><span id="result-subtitle" class="result-subtitle">Improved text</span></div>
@@ -61,6 +80,33 @@
 
     <!-- Tasks Panel -->
     <div id="panel-tasks" class="panel">
+      <div class="pomodoro" id="pomodoro">
+        <div class="pomo-top"><span class="pomo-label" id="pomo-status">Focus timer</span>
+          <div class="pomo-presets">
+            <button class="pomo-preset active" data-work="25" data-break="5" type="button">25/5</button>
+            <button class="pomo-preset" data-work="50" data-break="10" type="button">50/10</button>
+            <button class="pomo-preset" data-work="15" data-break="3" type="button">15/3</button>
+          </div>
+        </div>
+        <div class="pomo-display" id="pomo-display">25:00</div>
+        <div class="pomo-actions">
+          <button id="pomo-start" class="action-btn primary" type="button">Start</button>
+          <button id="pomo-reset" class="action-btn" type="button">Reset</button>
+        </div>
+      </div>
+      <div id="extraction-loading" class="loading" style="display:none;"><div class="spinner"></div><span>Finding action items…</span></div>
+      <div id="extraction-panel" class="extraction-panel" style="display:none;">
+        <div class="extraction-head">
+          <span class="extraction-title" id="extraction-title">Review action items</span>
+          <button id="extraction-close" class="extraction-close" type="button" title="Cancel">✕</button>
+        </div>
+        <p class="section-help" id="extraction-hint">Uncheck any you don't want, then add them as tasks.</p>
+        <div id="extraction-list" class="extraction-list"></div>
+        <div class="extraction-actions">
+          <button id="extraction-add" class="action-btn primary" type="button">Add selected</button>
+          <button id="extraction-cancel" class="action-btn" type="button">Cancel</button>
+        </div>
+      </div>
       <div class="task-form">
         <div class="section">
           <label class="section-label">Quick add</label>
@@ -86,6 +132,12 @@
               <button class="priority-btn" data-priority="P3">Medium</button>
               <button class="priority-btn" data-priority="P4">Low</button>
             </div>
+          </div>
+        </div>
+        <div class="task-form-row" id="subtasks-row">
+          <div class="task-field">
+            <label class="section-label">Subtasks (one per line)</label>
+            <textarea id="subtask-input" placeholder="Optional checklist…" rows="2"></textarea>
           </div>
         </div>
         <div class="task-form-row" id="recurrence-row">
@@ -120,6 +172,12 @@
       </div>
       <div id="task-loading" class="loading" style="display:none;"><div class="spinner"></div><span>Parsing task locally...</span></div>
 
+      <div class="task-view-tabs" id="task-view-tabs">
+        <button class="view-tab active" data-view="all" type="button">All</button>
+        <button class="view-tab" data-view="today" type="button">Today</button>
+        <button class="view-tab" data-view="upcoming" type="button">Upcoming</button>
+        <button class="view-tab" data-view="done" type="button">Done</button>
+      </div>
       <div id="task-list-view" class="task-view active">
         <div id="task-list"></div>
       </div>
@@ -132,6 +190,9 @@
       <div class="setting-group"><label class="setting-label">Local mode</label><input type="text" value="All writing features run locally in your browser." readonly><p class="setting-hint">No API key, account, or cloud processing is required.</p></div>
       <div class="setting-group"><label class="setting-label">Data handling</label><input type="text" value="Writing help and reminders stay local to this browser." readonly><p class="setting-hint">See <code>PRIVACY.md</code> before publishing to the Chrome Web Store.</p></div>
       <div class="setting-group"><label class="setting-label">Theme</label><select id="setting-theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+      <div class="setting-group"><label class="setting-label">Writing engine</label><select id="setting-ai-engine"><option value="auto">Auto — on-device AI when available</option><option value="off">Rules only (no AI)</option></select><p class="setting-hint" id="ai-engine-status">Checking on-device AI availability…</p></div>
+      <div class="setting-group"><label class="setting-label">Personal dictionary</label><div id="dictionary-list" class="dictionary-list"></div><p class="setting-hint" id="dictionary-empty">No custom words yet. Add them from the grammar popup ("Add to dictionary").</p></div>
+      <div class="setting-group"><label class="setting-label">Your data</label><div class="settings-data-actions"><button id="btn-export" class="action-btn" type="button">Export</button><button id="btn-import" class="action-btn" type="button">Import</button></div><input id="import-file" type="file" accept="application/json,.json" style="display:none;"><p class="setting-hint">Download or restore your tasks, settings, and dictionary (stays on this device).</p></div>
       <div class="settings-actions">
         <button id="btn-save-settings" class="action-btn primary">Save Settings</button>
         <button id="btn-close-settings" class="action-btn">Close</button>

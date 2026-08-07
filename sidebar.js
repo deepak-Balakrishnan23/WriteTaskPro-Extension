@@ -13,10 +13,12 @@
   const tabs = $$('.tab');
   const panels = { write: $('#panel-write'), tasks: $('#panel-tasks'), settings: $('#panel-settings') };
   const writeInput = $('#write-input'), modeBtns = $$('.mode-btn');
-  const btnParaphrase = $('#btn-paraphrase'), btnGrammar = $('#btn-grammar'), btnSummarize = $('#btn-summarize');
+  const btnParaphrase = $('#btn-paraphrase'), btnGrammar = $('#btn-grammar'), btnSummarize = $('#btn-summarize'), btnTone = $('#btn-tone');
+  const btnReadability = $('#btn-readability'), btnTranslate = $('#btn-translate'), translateLang = $('#translate-lang');
   const writeResult = $('#write-result'), resultContent = $('#result-content'), resultSubtitle = $('#result-subtitle'), writeLoading = $('#write-loading');
   const btnCopyResult = $('#btn-copy-result');
   const taskInput = $('#task-input'), btnAddTask = $('#btn-add-task'), taskLoading = $('#task-loading');
+  const subtaskInput = $('#subtask-input'), subtasksRow = $('#subtasks-row'), viewTabs = $$('.view-tab');
   const priorityBtns = $$('.priority-btn');
   const ritualBtns = $$('.ritual-btn');
   const durationBtns = $$('.duration-btn');
@@ -24,7 +26,12 @@
   const timeRow = $('#time-row');
   const timeBadges = $('#time-badges');
   const taskList = $('#task-list');
+  const extractionPanel = $('#extraction-panel'), extractionList = $('#extraction-list'), extractionLoading = $('#extraction-loading');
+  const extractionAdd = $('#extraction-add'), extractionCancel = $('#extraction-cancel'), extractionClose = $('#extraction-close'), extractionHint = $('#extraction-hint');
   const btnCloseSettings = $('#btn-close-settings'), settingTheme = $('#setting-theme');
+  const settingAiEngine = $('#setting-ai-engine'), aiEngineStatus = $('#ai-engine-status');
+  const dictionaryList = $('#dictionary-list'), dictionaryEmpty = $('#dictionary-empty');
+  const btnExport = $('#btn-export'), btnImport = $('#btn-import'), importFile = $('#import-file');
   const btnSaveSettings = $('#btn-save-settings');
 
   // ── State ──
@@ -41,6 +48,8 @@
   let summarizeTimeoutId = null;        // BUG-02 FIX
   let focusedTaskId = null;
   let focusHighlightTimer = null;
+  let extractionItems = [];
+  let currentView = 'all';
 
   // ── Theme ──
   function applyTheme(theme) {
@@ -67,9 +76,100 @@
       const result = await chrome.storage.local.get(['wtp_settings']);
       const s = result.wtp_settings || {};
       if (s.theme) settingTheme.value = s.theme;
+      if (settingAiEngine) settingAiEngine.value = s.aiEngine || 'auto';
       applyTheme(s.theme || 'system');
     } catch { }
+    refreshAiStatus();
   }
+
+  const AI_STATUS_TEXT = {
+    unsupported: "On-device AI isn't available in this browser — using the built-in rules engine.",
+    unavailable: "On-device AI isn't available on this device — using the built-in rules engine.",
+    off: 'On-device AI is turned off. Grammar and rewrites use the rules engine.',
+    ready: 'On-device AI is ready and handling grammar, rewrites, and summaries.',
+    available: 'On-device AI is ready to use.',
+    downloadable: 'On-device AI will download automatically the first time you use it.',
+    downloading: 'Downloading the on-device model… using the rules engine until it finishes.'
+  };
+
+  async function refreshAiStatus() {
+    if (!aiEngineStatus) return;
+    try {
+      const status = await sendMessage({ action: 'aiStatus' });
+      const key = status && status.state;
+      aiEngineStatus.textContent = AI_STATUS_TEXT[key] || 'Writing engine ready.';
+    } catch {
+      aiEngineStatus.textContent = 'Writing engine ready.';
+    }
+  }
+
+  // ── Personal dictionary ──
+  async function loadDictionary() {
+    if (!dictionaryList) return;
+    let words = [];
+    try { words = await sendMessage({ action: 'getDictionary' }) || []; } catch { words = []; }
+    if (!words.length) {
+      dictionaryList.innerHTML = '';
+      if (dictionaryEmpty) dictionaryEmpty.style.display = '';
+      return;
+    }
+    if (dictionaryEmpty) dictionaryEmpty.style.display = 'none';
+    dictionaryList.innerHTML = words.map((w) =>
+      `<span class="dict-chip">${escapeHTML(w)}<button type="button" class="dict-remove" data-word="${escapeHTML(w)}" title="Remove">✕</button></span>`
+    ).join('');
+  }
+
+  if (dictionaryList) {
+    dictionaryList.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.dict-remove');
+      if (!btn) return;
+      try { await sendMessage({ action: 'removeDictionaryWord', word: btn.dataset.word }); } catch { }
+      loadDictionary();
+    });
+  }
+
+  // ── Export / import ──
+  async function exportData() {
+    try {
+      const data = await chrome.storage.local.get(['wtp_tasks', 'wtp_settings', 'wtp_dictionary', 'wtp_disabled_sites']);
+      const payload = { app: 'WriteTask Pro', version: 1, exportedAt: new Date().toISOString(), data };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `writetaskpro-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('Data exported');
+    } catch (err) { showToast(err.message); }
+  }
+
+  async function importData(file) {
+    try {
+      const parsed = JSON.parse(await file.text());
+      const data = parsed && parsed.data ? parsed.data : parsed;
+      const allowed = ['wtp_tasks', 'wtp_settings', 'wtp_dictionary', 'wtp_disabled_sites'];
+      const toSet = {};
+      allowed.forEach((k) => { if (data[k] !== undefined) toSet[k] = data[k]; });
+      if (!Object.keys(toSet).length) { showToast('No WriteTask data found in file'); return; }
+      await chrome.storage.local.set(toSet);
+      try { await sendMessage({ action: 'rescheduleAll' }); } catch { }
+      await loadSettings();
+      await loadTasks();
+      await loadDictionary();
+      showToast('Data imported');
+    } catch (err) { showToast('Import failed: ' + err.message); }
+  }
+
+  if (btnExport) btnExport.addEventListener('click', exportData);
+  if (btnImport) btnImport.addEventListener('click', () => importFile && importFile.click());
+  if (importFile) importFile.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) importData(file);
+    e.target.value = '';
+  });
 
   // ══════════════════════════════════════
   // BUG-01 FIX: Tab navigation with previousTab tracking
@@ -90,6 +190,8 @@
     Object.values(panels).forEach(p => p.classList.remove('active'));
     panels.settings.classList.add('active');
     document.body.classList.add('settings-open');
+    loadDictionary();
+    refreshAiStatus();
   });
 
   btnCloseSettings.addEventListener('click', () => {
@@ -108,10 +210,13 @@
 
   btnSaveSettings.addEventListener('click', async () => {
     const settings = {
-      theme: settingTheme.value
+      theme: settingTheme.value,
+      aiEngine: settingAiEngine ? settingAiEngine.value : 'auto'
     };
     await chrome.storage.local.set({ wtp_settings: settings });
     applyTheme(settings.theme);
+    try { await sendMessage({ action: 'setAiEnabled', enabled: settings.aiEngine !== 'off' }); } catch { }
+    await refreshAiStatus();
     showToast('Settings saved');
   });
 
@@ -275,6 +380,66 @@
     hideLoading(writeLoading);
   });
 
+  // ── Tone ──
+  function renderToneHtml(result) {
+    const tones = (result && result.tones) || [];
+    if (!tones.length) return `<div>${escapeHTML((result && result.feedback) || 'No tone detected.')}</div>`;
+    const chips = tones.map((t) => `<span class="tone-chip">${t.emoji ? escapeHTML(t.emoji) + ' ' : ''}${escapeHTML(t.label)}</span>`).join('');
+    return `<div class="tone-chips">${chips}</div>${result.feedback ? `<div class="tone-feedback">${escapeHTML(result.feedback)}</div>` : ''}`;
+  }
+
+  if (btnTone) btnTone.addEventListener('click', async () => {
+    const text = getWriteText();
+    if (!text) return showToast('Enter some text first');
+    hideResult(); showLoading(writeLoading);
+    try {
+      const result = await sendMessage({ action: 'detectTone', text });
+      lastResultText = (result && result.feedback) || '';
+      showResult('Tone', renderToneHtml(result));
+    } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
+    hideLoading(writeLoading);
+  });
+
+  // ── Readability ──
+  function renderReadabilityHtml(r) {
+    const stat = (label, value) => `<div class="stat"><span class="stat-value">${escapeHTML(String(value))}</span><span class="stat-label">${escapeHTML(label)}</span></div>`;
+    return `<div class="stat-grid">
+      ${stat('Grade level', r.grade)}
+      ${stat('Reading ease', `${r.readingEase} · ${r.level}`)}
+      ${stat('Passive voice', `${r.passivePct}%`)}
+      ${stat('Avg sentence', `${r.avgSentenceLen} words`)}
+    </div>${r.feedback ? `<div class="tone-feedback">${escapeHTML(r.feedback)}</div>` : ''}`;
+  }
+
+  if (btnReadability) btnReadability.addEventListener('click', async () => {
+    const text = getWriteText();
+    if (!text) return showToast('Enter some text first');
+    hideResult(); showLoading(writeLoading);
+    try {
+      const r = await sendMessage({ action: 'readability', text });
+      lastResultText = r && r.feedback || '';
+      showResult('Readability', renderReadabilityHtml(r));
+    } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
+    hideLoading(writeLoading);
+  });
+
+  // ── Translate ──
+  if (btnTranslate) btnTranslate.addEventListener('click', async () => {
+    const text = getWriteText();
+    if (!text) return showToast('Enter some text first');
+    hideResult(); showLoading(writeLoading);
+    try {
+      const res = await sendMessage({ action: 'translate', text, target: translateLang ? translateLang.value : 'en' });
+      if (res && res.ok) {
+        lastResultText = res.text;
+        showResult(`Translation (${escapeHTML(res.lang || '')})`, `<div style="white-space:pre-wrap;">${escapeHTML(res.text)}</div>`);
+      } else {
+        showResult('Translation', `<div style="color:var(--text-secondary);">${escapeHTML((res && res.error) || 'Translation unavailable.')}</div>`);
+      }
+    } catch (err) { showResult('Error', `<div style="color:var(--danger);">${escapeHTML(err.message)}</div>`); }
+    hideLoading(writeLoading);
+  });
+
   // ══════════════════════════════════════
   // BUG-02 FIX: Summarize with 8s timeout
   // ══════════════════════════════════════
@@ -322,12 +487,23 @@
     showLoading(taskLoading);
     try {
       const parsed = await sendMessage({ action: 'parseTask', text });
-      parsed.title = text;
+      // Keep the cleaned title from the parser (strips "#tag", "tomorrow 3pm",
+      // priority words, etc.); fall back to the raw text if nothing is left.
+      if (!parsed.title) parsed.title = text;
       parsed.priority = selectedTaskKind === 'task' ? selectedPriority : null;
       parsed.kind = selectedTaskKind;
       parsed.durationMinutes = selectedDuration;
-      parsed.recurrenceMode = selectedRecurrence;
+      // A natural-language recurrence ("every day") wins over the composer default.
+      parsed.recurrenceMode = parsed.recurring ? 'recurring' : selectedRecurrence;
       parsed.timeSlot = selectedTimeSlot || null;
+
+      // Subtasks (one per line); preserve done-state on existing titles when editing.
+      const rawSubs = (subtaskInput ? subtaskInput.value : '').split('\n').map((s) => s.trim()).filter(Boolean);
+      const existingSubs = editingTaskId ? ((allTasks.find((t) => t.id === editingTaskId) || {}).subtasks || []) : [];
+      parsed.subtasks = rawSubs.map((title) => {
+        const prior = existingSubs.find((s) => s.title === title);
+        return { title, done: prior ? !!prior.done : false };
+      });
 
       if (editingTaskId) {
         await sendMessage({
@@ -341,7 +517,8 @@
             durationMinutes: parsed.durationMinutes,
             recurrenceMode: parsed.recurrenceMode,
             timeSlot: parsed.timeSlot,
-            labels: parsed.labels || []
+            labels: parsed.labels || [],
+            subtasks: parsed.subtasks
           }
         });
         await sendMessage({ action: 'acknowledgeReminders', taskId: editingTaskId });
@@ -358,6 +535,155 @@
     hideLoading(taskLoading);
   }
 
+  // ── Extract action items from selected text into tasks ──
+  if (extractionAdd) extractionAdd.addEventListener('click', addExtractedTasks);
+  if (extractionCancel) extractionCancel.addEventListener('click', hideExtraction);
+  if (extractionClose) extractionClose.addEventListener('click', hideExtraction);
+
+  function showExtractionLoading(show) {
+    if (extractionLoading) extractionLoading.style.display = show ? 'flex' : 'none';
+  }
+
+  function hideExtraction() {
+    if (extractionPanel) extractionPanel.style.display = 'none';
+    extractionItems = [];
+  }
+
+  function formatExtractionWhen(item) {
+    if (!item.reminderAt) return '';
+    const d = new Date(item.reminderAt);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
+  async function runExtraction(text) {
+    switchToPanel('tasks');
+    hideExtraction();
+    showExtractionLoading(true);
+    try {
+      const items = await sendMessage({ action: 'extractTasks', text });
+      showExtractionLoading(false);
+      if (!items || !items.length) { showToast('No action items found'); return; }
+      renderExtraction(items);
+    } catch (err) {
+      showExtractionLoading(false);
+      showToast(err.message);
+    }
+  }
+
+  function renderExtraction(items) {
+    extractionItems = items;
+    if (extractionHint) {
+      extractionHint.textContent = `Found ${items.length} action item${items.length === 1 ? '' : 's'}. Uncheck any you don't want.`;
+    }
+    extractionList.innerHTML = items.map((it, i) => {
+      const when = formatExtractionWhen(it);
+      const whenTag = when ? `<span class="task-tag date">${escapeHTML(when)}</span>` : '';
+      const prioTag = it.priority && it.priority !== 'P4' ? `<span class="task-tag priority ${it.priority}">${it.priority}</span>` : '';
+      const labelTags = (it.labels || []).map((l) => `<span class="task-tag label">${escapeHTML(l)}</span>`).join('');
+      return `<label class="extraction-item">
+        <input type="checkbox" data-i="${i}" checked>
+        <span class="extraction-item-body"><span class="extraction-item-title">${escapeHTML(it.title)}</span><span class="extraction-item-tags">${whenTag}${prioTag}${labelTags}</span></span>
+      </label>`;
+    }).join('');
+    extractionPanel.style.display = 'block';
+  }
+
+  async function addExtractedTasks() {
+    const checked = Array.from(extractionList.querySelectorAll('input[type="checkbox"]:checked'));
+    const chosen = checked.map((c) => extractionItems[Number(c.dataset.i)]).filter(Boolean);
+    if (!chosen.length) { showToast('Nothing selected'); return; }
+
+    showExtractionLoading(true);
+    try {
+      for (const it of chosen) {
+        await sendMessage({
+          action: 'createTask',
+          task: {
+            title: it.title,
+            kind: 'task',
+            priority: it.priority || 'P2',
+            durationMinutes: 15,
+            recurrenceMode: it.recurring ? 'recurring' : 'once',
+            labels: it.labels || [],
+            recurring: it.recurring || null,
+            reminderAt: it.reminderAt || null
+          }
+        });
+      }
+      showExtractionLoading(false);
+      hideExtraction();
+      await loadTasks();
+      showToast(`Added ${chosen.length} task${chosen.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      showExtractionLoading(false);
+      showToast(err.message);
+    }
+  }
+
+  // ── Pomodoro focus timer ──
+  const pomo = {
+    work: 25, brk: 5, phase: 'work', remaining: 25 * 60, running: false, interval: null
+  };
+  const pomoDisplay = $('#pomo-display'), pomoStatus = $('#pomo-status');
+  const pomoStart = $('#pomo-start'), pomoReset = $('#pomo-reset'), pomoPresets = $$('.pomo-preset');
+
+  function pomoRender() {
+    if (!pomoDisplay) return;
+    const m = Math.floor(pomo.remaining / 60), s = pomo.remaining % 60;
+    pomoDisplay.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    if (pomoStatus) pomoStatus.textContent = pomo.phase === 'work' ? 'Focus session' : 'Break';
+    if (pomoStart) pomoStart.textContent = pomo.running ? 'Pause' : 'Start';
+  }
+
+  function pomoNotify(message) {
+    showToast(message, { variant: 'reminder' });
+    try {
+      chrome.notifications.create(`pomo-${Date.now()}`, {
+        type: 'basic', iconUrl: chrome.runtime.getURL('icons/icon128.png'),
+        title: 'WriteTask Pro — Focus timer', message, priority: 2
+      });
+    } catch { /* notifications unavailable */ }
+  }
+
+  function pomoTick() {
+    pomo.remaining -= 1;
+    if (pomo.remaining <= 0) {
+      if (pomo.phase === 'work') {
+        pomo.phase = 'break'; pomo.remaining = pomo.brk * 60;
+        pomoNotify('Focus session done — take a break.');
+      } else {
+        pomo.phase = 'work'; pomo.remaining = pomo.work * 60;
+        pomoNotify('Break over — back to focus.');
+      }
+    }
+    pomoRender();
+  }
+
+  function pomoSetRunning(run) {
+    pomo.running = run;
+    if (pomo.interval) { clearInterval(pomo.interval); pomo.interval = null; }
+    if (run) pomo.interval = setInterval(pomoTick, 1000);
+    pomoRender();
+  }
+
+  if (pomoStart) pomoStart.addEventListener('click', () => pomoSetRunning(!pomo.running));
+  if (pomoReset) pomoReset.addEventListener('click', () => {
+    pomo.phase = 'work'; pomo.remaining = pomo.work * 60;
+    pomoSetRunning(false);
+  });
+  pomoPresets.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      pomoPresets.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      pomo.work = Number(btn.dataset.work) || 25;
+      pomo.brk = Number(btn.dataset.break) || 5;
+      pomo.phase = 'work'; pomo.remaining = pomo.work * 60;
+      pomoSetRunning(false);
+    });
+  });
+  pomoRender();
+
   async function loadTasks() {
     try { allTasks = await sendMessage({ action: 'getTasks' }) || []; } catch { allTasks = []; }
     renderTasks();
@@ -367,8 +693,27 @@
     renderListView();
   }
 
+  viewTabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      viewTabs.forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+      currentView = tab.dataset.view || 'all';
+      renderTasks();
+    });
+  });
+
   function getFilteredTasks() {
-    return [...allTasks];
+    const endToday = new Date();
+    endToday.setHours(23, 59, 59, 999);
+    return allTasks.filter((t) => {
+      if (currentView === 'done') return t.completed;
+      if (t.completed) return false;
+      if (currentView === 'all') return true;
+      const when = t.reminderAt ? new Date(t.reminderAt) : null;
+      if (currentView === 'today') return t.attentionNeeded || (when && !Number.isNaN(when.getTime()) && when <= endToday);
+      if (currentView === 'upcoming') return when && !Number.isNaN(when.getTime()) && when > endToday;
+      return true;
+    });
   }
 
   function renderListView() {
@@ -407,7 +752,10 @@
     const editingClass = editingTaskId === task.id ? ' editing' : '';
     const readyClass = task.attentionNeeded ? ' ready' : '';
     const focusedClass = focusedTaskId === task.id ? ' focused' : '';
-    return `<div class="task-item ${task.completed ? 'completed' : ''}${editingClass}${readyClass}${focusedClass}" data-id="${task.id}">${leading}<div class="task-body"><div class="task-title">${escapeHTML(task.title)}</div><div class="task-meta">${reminderLabel ? `<span class="task-tag date">${escapeHTML(reminderLabel)}</span>` : ''}${scheduleTag ? `<span class="task-tag date">${escapeHTML(scheduleTag)}</span>` : ''}${kindLabel ? `<span class="task-tag kind">${escapeHTML(kindLabel)}</span>` : ''}${priorityTag}${recurrenceTag}${(task.labels || []).map(l => `<span class="task-tag label">${escapeHTML(l)}</span>`).join('')}</div></div>${actions}</div>`;
+    const subtasksHtml = (task.subtasks && task.subtasks.length)
+      ? `<div class="subtask-list">${task.subtasks.map((s, i) => `<button type="button" class="subtask-check ${s.done ? 'done' : ''}" data-id="${task.id}" data-idx="${i}"><span class="subtask-box"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg></span><span class="subtask-title">${escapeHTML(s.title)}</span></button>`).join('')}</div>`
+      : '';
+    return `<div class="task-item ${task.completed ? 'completed' : ''}${editingClass}${readyClass}${focusedClass}" data-id="${task.id}">${leading}<div class="task-body"><div class="task-title">${escapeHTML(task.title)}</div><div class="task-meta">${reminderLabel ? `<span class="task-tag date">${escapeHTML(reminderLabel)}</span>` : ''}${scheduleTag ? `<span class="task-tag date">${escapeHTML(scheduleTag)}</span>` : ''}${kindLabel ? `<span class="task-tag kind">${escapeHTML(kindLabel)}</span>` : ''}${priorityTag}${recurrenceTag}${(task.labels || []).map(l => `<span class="task-tag label">${escapeHTML(l)}</span>`).join('')}</div>${subtasksHtml}</div>${actions}</div>`;
   }
 
   function focusTaskInList(taskId) {
@@ -430,6 +778,17 @@
   // ══════════════════════════════════════
   function initTaskListDelegation() {
     taskList.addEventListener('click', async (e) => {
+      const sub = e.target.closest('.subtask-check');
+      if (sub) {
+        const task = allTasks.find((t) => t.id === sub.dataset.id);
+        const idx = Number(sub.dataset.idx);
+        if (task && task.subtasks && task.subtasks[idx]) {
+          task.subtasks[idx].done = !task.subtasks[idx].done;
+          try { await sendMessage({ action: 'updateTask', taskId: task.id, updates: { subtasks: task.subtasks } }); await loadTasks(); }
+          catch (err) { showToast(err.message); }
+        }
+        return;
+      }
       const check = e.target.closest('.task-check');
       if (check) {
         const id = check.dataset.id;
@@ -495,6 +854,9 @@
       case 'addTask':
         taskInput.value = data.text;
         switchToPanel('tasks');
+        break;
+      case 'extractTasks':
+        runExtraction(data.text || '');
         break;
       case 'summarize':
         writeInput.value = data.content || '';
@@ -596,6 +958,7 @@
   function resetTaskComposer() {
     editingTaskId = null;
     selectedTaskKind = 'task';
+    if (subtaskInput) subtaskInput.value = '';
     ritualBtns.forEach((btn) => btn.classList.toggle('active', btn.dataset.kind === 'task'));
     setPriority('P2');
     setDuration(15);
@@ -640,6 +1003,7 @@
     setDuration(task.durationMinutes || taskTemplates[task.kind || 'task']?.minutes || 15);
     setRecurrence(task.recurrenceMode || 'once');
     setTimeSlot(task.timeSlot || taskTemplates[task.kind || 'task']?.timeSlot || '');
+    if (subtaskInput) subtaskInput.value = (task.subtasks || []).map((s) => s.title).join('\n');
     updateTaskComposerButton();
     syncTaskComposer();
     switchToPanel('tasks');
@@ -685,6 +1049,9 @@
 
     if (priorityRow) {
       priorityRow.style.display = isTask ? '' : 'none';
+    }
+    if (subtasksRow) {
+      subtasksRow.style.display = isTask ? '' : 'none';
     }
     if (recurrenceRow) {
       recurrenceRow.style.display = (selectedTaskKind === 'water' || selectedTaskKind === 'screen' || hasTimedSlots) ? '' : 'none';
