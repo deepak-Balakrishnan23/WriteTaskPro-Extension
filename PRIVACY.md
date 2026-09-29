@@ -22,8 +22,9 @@ WriteTask Pro processes writing assistance and reminder data locally in the brow
 - `storage`: saves tasks and theme settings locally
 - `alarms`: schedules local reminder notifications
 - `contextMenus`: provides right-click actions you request
-- `tabs` and `activeTab`: opens the sidebar on the active page and updates reminders on open tabs
-- `scripting`: injects the content script on the active tab when needed after install/reload
+- `activeTab`: shows the per-site on/off switch for the page you're on
+- `sidePanel`: shows the writing and task sidebar in Chrome's side panel
+- `notifications`: shows reminder and focus-timer alerts
 
 ## Contact
 Update this section with your support or publisher email before Chrome Web Store submission.

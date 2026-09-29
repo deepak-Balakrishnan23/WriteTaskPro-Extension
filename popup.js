@@ -2,17 +2,18 @@
   'use strict';
 
   function sendMessage(msg) {
-    return new Promise((resolve, reject) => {
-      try {
-        chrome.runtime.sendMessage(msg, (response) => {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else if (response?.error) reject(new Error(response.error));
-          else resolve(response);
-        });
-      } catch (err) {
-        reject(err);
-      }
-    });
+    return chrome.runtime.sendMessage(msg)
+      .then((response) => (response?.error ? Promise.reject(new Error(response.error)) : response));
+  }
+
+  // Looked up at load so click handlers can call sidePanel.open() before any
+  // await; Chrome only allows it while the click's user gesture is live.
+  let activeTab = null;
+
+  function openSidebar(...messages) {
+    if (!activeTab?.id) return Promise.resolve();
+    const opening = chrome.sidePanel.open({ tabId: activeTab.id });
+    return Promise.all([opening, sendMessage({ action: 'openSidebar', messages })]);
   }
 
   function escapeHTML(str) {
@@ -31,40 +32,6 @@
     return Boolean(url) && !/^(chrome|chrome-extension|edge|about|brave|moz-extension):/i.test(url);
   }
 
-  async function ensureSidebarReady(tabId, options = {}) {
-    try {
-      await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', ...options });
-      return true;
-    } catch {
-      // The content script may not exist yet on already-open tabs.
-    }
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id || tab.id !== tabId || !canInjectIntoTab(tab)) {
-      return false;
-    }
-
-    await chrome.scripting.insertCSS({
-      target: { tabId },
-      files: ['content-styles.css']
-    });
-
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content.js']
-    });
-
-    await chrome.tabs.sendMessage(tabId, { action: 'openSidebar', ...options });
-    return true;
-  }
-
-  async function openSidebarOnActiveTab(options) {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      await ensureSidebarReady(tab.id, options);
-    }
-  }
-
   function hostnameFromUrl(url) {
     try { return new URL(url).hostname; } catch { return ''; }
   }
@@ -75,7 +42,7 @@
     const label = document.getElementById('popup-site-label');
     if (!section || !toggle) return;
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = activeTab;
       const host = hostnameFromUrl(tab?.url);
       if (!host || !canInjectIntoTab(tab)) return; // not a normal page
       section.style.display = 'block';
@@ -95,7 +62,9 @@
   }
 
   async function init() {
+    try { [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }); } catch { }
     initSiteToggle();
+    let firstReadyTask = null;
     try {
       const settings = await chrome.storage.local.get(['wtp_settings']);
       applyTheme(settings?.wtp_settings?.theme || 'system');
@@ -104,7 +73,7 @@
       const container = document.getElementById('popup-tasks');
       const readyBanner = document.getElementById('popup-ready-banner');
       const readyCount = pendingTasks.filter((task) => task.attentionNeeded).length;
-      const firstReadyTask = pendingTasks.find((task) => task.attentionNeeded) || null;
+      firstReadyTask = pendingTasks.find((task) => task.attentionNeeded) || null;
 
       if (readyCount > 0) {
         readyBanner.textContent = `${readyCount} reminder${readyCount === 1 ? '' : 's'} ready`;
@@ -136,7 +105,7 @@
         const item = event.target.closest('[data-task-id]');
         if (!item) return;
         try {
-          await openSidebarOnActiveTab({ panel: 'tasks', focusTaskId: item.dataset.taskId });
+          await openSidebar({ action: 'openPanel', panel: 'tasks', focusTaskId: item.dataset.taskId });
         } catch { }
         window.close();
       });
@@ -149,13 +118,9 @@
 
     document.getElementById('popup-open-sidebar').addEventListener('click', async () => {
       try {
-        const tasks = await sendMessage({ action: 'getTasks' });
-        const firstReadyTask = (tasks || []).find((task) => !task.completed && task.attentionNeeded) || null;
-        await openSidebarOnActiveTab(
-          firstReadyTask
-            ? { panel: 'tasks', focusTaskId: firstReadyTask.id }
-            : { panel: 'write' }
-        );
+        await openSidebar(firstReadyTask
+          ? { action: 'openPanel', panel: 'tasks', focusTaskId: firstReadyTask.id }
+          : { action: 'openPanel', panel: 'write' });
       } catch { }
       window.close();
     });

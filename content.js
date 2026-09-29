@@ -1,10 +1,9 @@
 /* =========================================================
-   WriteTask Pro — Content Script (ALL BUGS FIXED)
-   
-   BUG-07 FIX: Sidebar iframe ready-state handshake with message queue
-   BUG-10 FIX: Truncate page content to 8000 chars before postMessage
-   BUG-13 FIX: Safer text replacement with execCommand fallback
-   BUG-14 FIX: Changed shortcut to Ctrl+Shift+E (no browser conflict)
+   WriteTask Pro — Content Script
+
+   In-page UI only: selection toolbar, inline grammar underlines,
+   synonyms and autocomplete. The sidebar is Chrome's side panel
+   (sidebar.html); this script asks the background to open it.
    ========================================================= */
 
 (() => {
@@ -13,11 +12,6 @@
   window.__writeTaskProLoaded = true;
 
   // ── State ──
-  let sidebarOpen = false;
-  let sidebarFrame = null;
-  let sidebarReady = false;       // BUG-07 FIX
-  let pendingMessages = [];       // BUG-07 FIX
-  let floatingBtn = null;
   let selectionToolbar = null;
   let typingGrammarTimer = null;
   let siteEnabled = true;
@@ -54,150 +48,16 @@
     }
   }
 
-  function getRuntimeUrl(path) {
-    if (!isRuntimeAvailable()) return null;
-    try {
-      return chrome.runtime.getURL(path);
-    } catch {
-      return null;
-    }
-  }
-
   function sendRuntimeMessage(message) {
-    return new Promise((resolve, reject) => {
-      if (!isRuntimeAvailable()) {
-        reject(new Error('WriteTask Pro was reloaded. Refresh the page and try again.'));
-        return;
-      }
-
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        if (response?.error) {
-          reject(new Error(typeof response.error === 'string' ? response.error : response.error.message || 'Request failed'));
-          return;
-        }
-        resolve(response);
-      });
-    });
+    if (!isRuntimeAvailable()) return Promise.reject(new Error('WriteTask Pro was reloaded. Refresh the page and try again.'));
+    return chrome.runtime.sendMessage(message)
+      .then((response) => (response?.error ? Promise.reject(new Error(response.error)) : response));
   }
 
-  // ══════════════════════════════════════
-  // BUG-07 FIX: Send with ready-gate
-  // ══════════════════════════════════════
-  function sendToSidebar(msg) {
-    if (sidebarReady && sidebarFrame?.contentWindow) {
-      sidebarFrame.contentWindow.postMessage(msg, '*');
-    } else {
-      pendingMessages.push(msg);
-    }
-  }
-
-  function flushPendingMessages() {
-    if (!sidebarFrame?.contentWindow) return;
-    const msgs = pendingMessages.splice(0);
-    msgs.forEach(msg => sidebarFrame.contentWindow.postMessage(msg, '*'));
-  }
-
-  // ── Floating Action Button ──
-  function createFloatingButton() {
-    floatingBtn = document.createElement('div');
-    floatingBtn.id = 'wtp-fab';
-    floatingBtn.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
-    floatingBtn.title = 'WriteTask Pro';
-    floatingBtn.addEventListener('click', toggleSidebar);
-    document.body.appendChild(floatingBtn);
-  }
-
-  async function refreshReminderIndicator() {
-    if (!floatingBtn) return;
-    try {
-      const tasks = await sendRuntimeMessage({ action: 'getTasks' });
-      const readyCount = (tasks || []).filter((task) => !task.completed && task.attentionNeeded).length;
-      floatingBtn.classList.toggle('wtp-has-alert', readyCount > 0);
-      floatingBtn.dataset.reminderCount = readyCount > 0 ? String(Math.min(readyCount, 9)) : '';
-    } catch {
-      floatingBtn.classList.remove('wtp-has-alert');
-      floatingBtn.dataset.reminderCount = '';
-    }
-  }
-
-  // ── Sidebar (iframe) ──
-  function createSidebar() {
-    const sidebarUrl = getRuntimeUrl('sidebar.html');
-    if (!sidebarUrl) return;
-
-    const wrapper = document.createElement('div');
-    wrapper.id = 'wtp-sidebar-wrapper';
-
-    sidebarFrame = document.createElement('iframe');
-    sidebarFrame.id = 'wtp-sidebar-frame';
-    sidebarFrame.src = sidebarUrl;
-    sidebarFrame.setAttribute('allow', 'microphone');
-
-    wrapper.appendChild(sidebarFrame);
-    document.body.appendChild(wrapper);
-
-    sidebarReady = false;
-    pendingMessages = [];
-
-    window.addEventListener('message', (e) => {
-      if (e.data?.source !== 'wtp-sidebar') return;
-
-      // BUG-07 FIX: Handshake — sidebar announces it's ready
-      if (e.data.action === 'sidebarReady') {
-        sidebarReady = true;
-        flushPendingMessages();
-        return;
-      }
-
-      handleSidebarMessage(e.data);
-    });
-  }
-
-  function toggleSidebar() {
-    if (!isRuntimeAvailable()) return;
-    const wrapper = document.getElementById('wtp-sidebar-wrapper');
-    if (!wrapper) {
-      createSidebar();
-      if (!sidebarFrame) return;
-      sidebarOpen = true;
-      requestAnimationFrame(() => {
-        document.getElementById('wtp-sidebar-wrapper')?.classList.add('wtp-open');
-      });
-    } else {
-      sidebarOpen = !sidebarOpen;
-      wrapper.classList.toggle('wtp-open', sidebarOpen);
-    }
-  }
-
-  function handleSidebarMessage(data) {
-    switch (data.action) {
-      case 'closeSidebar':
-        toggleSidebar();
-        break;
-      case 'replaceSelection':
-        replaceSelectedText(data.text);
-        break;
-      case 'getPageContent':
-        const content = (document.body.innerText || '').trim();
-        sendToSidebar({ source: 'wtp-content', action: 'pageContent', content });
-        break;
-    }
-  }
-
-  function openSidebarForWriteAction(action, payload = {}) {
-    if (!sidebarOpen) toggleSidebar();
-    sendToSidebar({ source: 'wtp-content', action: 'openPanel', panel: 'write' });
-    sendToSidebar({ source: 'wtp-content', action, ...payload });
-  }
-
-  function openSidebarForTasks(text) {
-    if (!sidebarOpen) toggleSidebar();
-    sendToSidebar({ source: 'wtp-content', action: 'openPanel', panel: 'tasks' });
-    sendToSidebar({ source: 'wtp-content', action: 'extractTasks', text });
+  // Opens the side panel with these messages queued for it. Call straight from a
+  // click handler: the background must receive it while the user gesture is live.
+  function openSidebar(...messages) {
+    sendRuntimeMessage({ action: 'openSidebar', messages }).catch(() => {});
   }
 
   function isTextInputElement(el) {
@@ -274,25 +134,11 @@
       const sel = window.getSelection();
       const text = sel.toString().trim();
       if (!text) return;
-      if (action === 'paraphrase') {
-        hideSuggestionCard();
-        hideSelectionToolbar();
-        openSidebarForWriteAction('paraphrase', { text });
-        return;
-      }
-
-      if (action === 'summarize') {
-        hideSuggestionCard();
-        hideSelectionToolbar();
-        openSidebarForWriteAction('summarize', { content: text });
-        return;
-      }
-
-      if (action === 'tasks') {
-        hideSuggestionCard();
-        hideSelectionToolbar();
-        openSidebarForTasks(text);
-      }
+      hideSuggestionCard();
+      hideSelectionToolbar();
+      if (action === 'paraphrase') openSidebar({ action: 'paraphrase', text });
+      else if (action === 'summarize') openSidebar({ action: 'summarize', content: text });
+      else if (action === 'tasks') openSidebar({ action: 'extractTasks', text });
     });
   }
 
@@ -772,7 +618,7 @@
   // ── Text Selection Listener ──
   document.addEventListener('mouseup', (e) => {
     if (!siteEnabled) return;
-    if (e.target.closest('#wtp-sidebar-wrapper') || e.target.closest('#wtp-selection-toolbar') || e.target.closest('#wtp-fab')) return;
+    if (e.target.closest('#wtp-selection-toolbar')) return;
     setTimeout(() => {
       const sel = window.getSelection();
       const text = sel.toString().trim();
@@ -838,104 +684,13 @@
   window.addEventListener('scroll', onViewportShift, true);
   window.addEventListener('resize', onViewportShift, true);
 
-  // ══════════════════════════════════════
-  // BUG-13 FIX: Safer text replacement
-  // ══════════════════════════════════════
-  function replaceSelectedText(newText) {
-    const sel = window.getSelection();
-    if (sel.rangeCount === 0) return;
-    const activeEl = document.activeElement;
-
-    // Handle regular input / textarea
-    if (activeEl && (activeEl.tagName === 'TEXTAREA' || (activeEl.tagName === 'INPUT' && activeEl.type === 'text'))) {
-      const start = activeEl.selectionStart;
-      const end = activeEl.selectionEnd;
-      const val = activeEl.value;
-      activeEl.value = val.substring(0, start) + newText + val.substring(end);
-      activeEl.selectionStart = activeEl.selectionEnd = start + newText.length;
-      activeEl.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
-
-    // Handle contentEditable — use execCommand for editor compatibility
-    if (activeEl?.isContentEditable || document.designMode === 'on') {
-      try {
-        // execCommand preserves undo stack and editor state in rich editors
-        document.execCommand('insertText', false, newText);
-        return;
-      } catch {
-        // Fallback to range manipulation
-      }
-    }
-
-    // Fallback: raw range manipulation
-    try {
-      const range = sel.getRangeAt(0);
-      range.deleteContents();
-      range.insertNode(document.createTextNode(newText));
-      sel.removeAllRanges();
-    } catch { }
-  }
-
-  // ── Messages from background ──
+  // The side panel asks for the page text when summarizing a whole page.
+  // Capped so a huge page doesn't swamp the on-device model.
   if (isRuntimeAvailable()) {
-    try {
-      chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-        if (!isRuntimeAvailable()) return;
-
-        // BUG-07 FIX: All messages use ready-gated sender
-        if (msg.action === 'openSidebar') {
-          if (!sidebarOpen) toggleSidebar();
-          sendToSidebar({
-            source: 'wtp-content',
-            action: 'openPanel',
-            panel: msg.panel || 'write',
-            focusTaskId: msg.focusTaskId || null
-          });
-        }
-        if (msg.action === 'contextMenuParaphrase') {
-          if (!sidebarOpen) toggleSidebar();
-          sendToSidebar({ source: 'wtp-content', action: 'paraphrase', text: msg.text });
-        }
-        if (msg.action === 'contextMenuGrammar') {
-          if (!sidebarOpen) toggleSidebar();
-          sendToSidebar({ source: 'wtp-content', action: 'grammar', text: msg.text });
-        }
-        if (msg.action === 'contextMenuAddTask') {
-          if (!sidebarOpen) toggleSidebar();
-          sendToSidebar({ source: 'wtp-content', action: 'addTask', text: msg.text, url: msg.url });
-        }
-        if (msg.action === 'contextMenuExtractTasks') {
-          openSidebarForTasks(msg.text);
-        }
-        if (msg.action === 'contextMenuSummarize') {
-          if (!sidebarOpen) toggleSidebar();
-          const content = (document.body.innerText || '').trim();
-          sendToSidebar({ source: 'wtp-content', action: 'summarize', content });
-        }
-        if (msg.action === 'tasksUpdated') {
-          sendToSidebar({ source: 'wtp-content', ...msg });
-          refreshReminderIndicator();
-        }
-        if (msg.action === 'reminderTriggered') {
-          sendToSidebar({ source: 'wtp-content', ...msg });
-          refreshReminderIndicator();
-        }
-      });
-    } catch {
-      // Ignore stale extension context after reload.
-    }
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg.action === 'getPageContent') sendResponse((document.body.innerText || '').trim().slice(0, 8000));
+    });
   }
-
-  // ══════════════════════════════════════
-  // BUG-14 FIX: Use Ctrl+Shift+E (no conflict)
-  // ══════════════════════════════════════
-  document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && e.shiftKey && e.key === 'E') {
-      e.preventDefault();
-      toggleSidebar();
-    }
-  });
 
   // ── Init ──
   async function isSiteEnabled() {
@@ -948,9 +703,7 @@
   async function boot() {
     siteEnabled = await isSiteEnabled();
     if (!siteEnabled) return; // passive UI off on this site
-    createFloatingButton();
     createSelectionToolbar();
-    refreshReminderIndicator();
   }
 
   boot();

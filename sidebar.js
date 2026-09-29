@@ -45,7 +45,6 @@
   let lastResultText = '';
   let allTasks = [];
   let previousTab = 'write';           // BUG-01 FIX
-  let summarizeTimeoutId = null;        // BUG-02 FIX
   let focusedTaskId = null;
   let focusHighlightTimer = null;
   let extractionItems = [];
@@ -65,10 +64,18 @@
     await loadSettings();
     await loadTasks();
     initTaskListDelegation();     // BUG-06 FIX
-    window.addEventListener('message', handleContentMessage);
+    // Background broadcasts (tasksUpdated, reminderTriggered) arrive directly;
+    // page actions wait in the background's queue until we take them.
+    chrome.runtime.onMessage.addListener((msg, sender) => {
+      if (sender.tab) return; // content-script traffic meant for the background
+      if (msg?.action === 'sidebarQueued') takeQueuedMessages();
+      else handleMessage(msg);
+    });
+    takeQueuedMessages();
+  }
 
-    // BUG-07 FIX: Signal to content script that sidebar is ready
-    window.parent.postMessage({ source: 'wtp-sidebar', action: 'sidebarReady' }, '*');
+  async function takeQueuedMessages() {
+    try { (await sendMessage({ action: 'takeSidebarQueue' }) || []).forEach(handleMessage); } catch { }
   }
 
   async function loadSettings() {
@@ -154,6 +161,12 @@
       const toSet = {};
       allowed.forEach((k) => { if (data[k] !== undefined) toSet[k] = data[k]; });
       if (!Object.keys(toSet).length) { showToast('No WriteTask data found in file'); return; }
+      // Trust boundary: task id/priority are rendered into HTML attributes unescaped.
+      if (toSet.wtp_tasks !== undefined) {
+        if (!Array.isArray(toSet.wtp_tasks)) throw new Error('tasks must be a list');
+        toSet.wtp_tasks = toSet.wtp_tasks.filter((t) => t && /^[\w-]+$/.test(t.id) && typeof t.title === 'string');
+        toSet.wtp_tasks.forEach((t) => { if (!['P1', 'P2', 'P3', 'P4'].includes(t.priority)) t.priority = 'P4'; });
+      }
       await chrome.storage.local.set(toSet);
       try { await sendMessage({ action: 'rescheduleAll' }); } catch { }
       await loadSettings();
@@ -220,9 +233,7 @@
     showToast('Settings saved');
   });
 
-  btnClose.addEventListener('click', () => {
-    window.parent.postMessage({ source: 'wtp-sidebar', action: 'closeSidebar' }, '*');
-  });
+  btnClose.addEventListener('click', () => window.close());
 
   // ── Paraphrase Mode ──
   modeBtns.forEach(btn => {
@@ -292,15 +303,8 @@
 
   // ── Send to Background ──
   function sendMessage(msg) {
-    return new Promise((resolve, reject) => {
-      try {
-        chrome.runtime.sendMessage(msg, (response) => {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else if (response?.error) reject(new Error(response.error));
-          else resolve(response);
-        });
-      } catch (err) { reject(err); }
-    });
+    return chrome.runtime.sendMessage(msg)
+      .then((response) => (response?.error ? Promise.reject(new Error(response.error)) : response));
   }
 
   function showLoading(el) { el.style.display = 'flex'; }
@@ -440,27 +444,30 @@
     hideLoading(writeLoading);
   });
 
-  // ══════════════════════════════════════
-  // BUG-02 FIX: Summarize with 8s timeout
-  // ══════════════════════════════════════
+  // Summarize the typed text, or the current page when the box is empty.
   btnSummarize.addEventListener('click', async () => {
     const text = getWriteText();
+    if (!text) return summarizePage();
     hideResult(); showLoading(writeLoading);
-
-    if (text) {
-      await runSummary(text);
-      hideLoading(writeLoading);
-      return;
-    }
-
-    if (summarizeTimeoutId) clearTimeout(summarizeTimeoutId);
-    summarizeTimeoutId = setTimeout(() => {
-      hideLoading(writeLoading);
-      showResult('Error', '<div style="color:var(--danger);">Could not retrieve page content. Make sure you\'re on a regular webpage (not a browser settings page).</div>');
-      summarizeTimeoutId = null;
-    }, 8000);
-    window.parent.postMessage({ source: 'wtp-sidebar', action: 'getPageContent' }, '*');
+    await runSummary(text);
+    hideLoading(writeLoading);
   });
+
+  async function summarizePage() {
+    switchToPanel('write');
+    hideResult(); showLoading(writeLoading);
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const content = await chrome.tabs.sendMessage(tab.id, { action: 'getPageContent' });
+      writeInput.value = content || '';
+      writeInput.scrollTop = 0;
+      await runSummary(content);
+    } catch {
+      // No content script: a browser page, or a tab opened before the extension loaded.
+      showResult('Error', '<div style="color:var(--danger);">Could not read this page. Use a regular webpage (not a browser settings page), or reload the tab and try again.</div>');
+    }
+    hideLoading(writeLoading);
+  }
 
   // ── Copy & Replace ──
   btnCopyResult.addEventListener('click', async () => {
@@ -822,12 +829,9 @@
     });
   }
 
-  // ── Handle Messages from Content Script ──
-  function handleContentMessage(event) {
-    const data = event.data;
-    if (data?.source !== 'wtp-content') return;
-
-    switch (data.action) {
+  // ── Handle messages from the background (queued page actions + broadcasts) ──
+  function handleMessage(data) {
+    switch (data?.action) {
       case 'openPanel':
         switchToPanel(data.panel || 'write');
         if (data.focusTaskId) {
@@ -847,10 +851,6 @@
         switchToPanel('write');
         btnGrammar.click();
         break;
-      case 'tone':
-        writeInput.value = data.text;
-        switchToPanel('write');
-        break;
       case 'addTask':
         taskInput.value = data.text;
         switchToPanel('tasks');
@@ -864,21 +864,12 @@
         switchToPanel('write');
         (async () => {
           showLoading(writeLoading);
-          if (summarizeTimeoutId) { clearTimeout(summarizeTimeoutId); summarizeTimeoutId = null; }
           await runSummary(data.content);
           hideLoading(writeLoading);
         })();
         break;
-      case 'pageContent':
-        // BUG-02 FIX: Clear the summarize timeout
-        if (summarizeTimeoutId) { clearTimeout(summarizeTimeoutId); summarizeTimeoutId = null; }
-        writeInput.value = data.content || '';
-        writeInput.scrollTop = 0;
-        switchToPanel('write');
-        (async () => {
-          await runSummary(data.content);
-          hideLoading(writeLoading);
-        })();
+      case 'summarizePage':
+        summarizePage();
         break;
       case 'tasksUpdated':
         loadTasks();
@@ -902,18 +893,6 @@
 
   // ── Utilities ──
   function escapeHTML(str) { if (!str) return ''; return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
-
-  function formatDate(dateStr) {
-    if (!dateStr) return '';
-    const d = new Date(dateStr + 'T00:00:00'), today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
-    const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
-    if (d.getTime() === today.getTime()) return 'Today';
-    if (d.getTime() === tomorrow.getTime()) return 'Tomorrow';
-    if (d.getTime() === yesterday.getTime()) return 'Yesterday';
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  }
 
   function setPriority(priority) {
     selectedPriority = priority;
@@ -951,7 +930,7 @@
       setDuration(template.minutes);
     }
     setTimeSlot(template.timeSlot || '');
-    setRecurrence(kind === 'tea' || kind === 'lunch' ? 'once' : 'once');
+    setRecurrence('once');
     syncTaskComposer();
   }
 

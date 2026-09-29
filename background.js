@@ -29,15 +29,41 @@ chrome.runtime.onInstalled.addListener(() => {
 
 });
 
+/* ── Side panel ──
+   Messages for the panel wait in a queue until the panel takes them, so nothing
+   is lost while it is still loading. The panel drains it on load and whenever
+   it is told something was queued. */
+// ponytail: in-memory queue, lost if the worker is killed before the panel loads; move to chrome.storage.session if that bites.
+const sidebarQueue = [];
+
+function queueForSidebar(messages) {
+  if (!messages.length) return;
+  sidebarQueue.push(...messages);
+  chrome.runtime.sendMessage({ action: 'sidebarQueued' }).catch(() => {});
+}
+
+// Must be called synchronously inside a user-gesture handler (no await first),
+// or Chrome rejects sidePanel.open().
+function openSidebar(tabId, messages = []) {
+  chrome.sidePanel.open({ tabId }).catch(() => {});
+  queueForSidebar(messages);
+}
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (!tab?.id) return;
-  const send = (msg) => chrome.tabs.sendMessage(tab.id, msg).catch(() => {});
+  const text = info.selectionText;
+  const message = {
+    'writetask-paraphrase': { action: 'paraphrase', text },
+    'writetask-grammar': { action: 'grammar', text },
+    'writetask-add-task': { action: 'addTask', text },
+    'writetask-extract-tasks': { action: 'extractTasks', text },
+    'writetask-summarize': { action: 'summarizePage' }
+  }[info.menuItemId];
+  if (message) openSidebar(tab.id, [message]);
+});
 
-  if (info.menuItemId === 'writetask-paraphrase') send({ action: 'contextMenuParaphrase', text: info.selectionText });
-  else if (info.menuItemId === 'writetask-grammar') send({ action: 'contextMenuGrammar', text: info.selectionText });
-  else if (info.menuItemId === 'writetask-add-task') send({ action: 'contextMenuAddTask', text: info.selectionText, url: info.pageUrl });
-  else if (info.menuItemId === 'writetask-extract-tasks') send({ action: 'contextMenuExtractTasks', text: info.selectionText });
-  else if (info.menuItemId === 'writetask-summarize') send({ action: 'contextMenuSummarize' });
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === 'open-sidebar' && tab?.id) openSidebar(tab.id);
 });
 
 function normalizeWhitespace(text) {
@@ -122,10 +148,7 @@ const AI_TASK_PROMPTS = {
     const instructions = {
       standard: 'Rewrite the text below to be clearer and more natural.',
       formal: 'Rewrite the text below in a formal, professional tone.',
-      casual: 'Rewrite the text below in a casual, friendly tone.',
-      shorten: 'Rewrite the text below to be more concise while keeping the key information.',
-      expand: 'Rewrite the text below with more detail, explanation, and context.',
-      creative: 'Rewrite the text below in a more vivid, engaging, and creative way.'
+      casual: 'Rewrite the text below in a casual, friendly tone.'
     };
     const mode = (opts && opts.mode) || 'standard';
     return `${instructions[mode] || instructions.standard} Return only the rewritten text.\n\nText:\n${text}`;
@@ -364,13 +387,10 @@ function diffToIssues(original, corrected) {
       start = deleted[0].start;
       end = deleted[deleted.length - 1].end;
     } else {
-      // Pure insertion: anchor onto the character before the insertion point.
-      const anchor = issues.length ? null : null;
-      // Find the original offset just after the previous equal token.
+      // Pure insertion: anchor onto the character just after the previous equal token.
       const prevOp = ops[k - inserted.length - 1];
       start = prevOp && prevOp.ai != null ? origTokens[prevOp.ai].end : 0;
       end = Math.min(original.length, start + 1);
-      void anchor;
     }
 
     issues.push({
@@ -432,20 +452,20 @@ function applyCoreCorrections(text) {
   return ensureTrailingPunctuation(result);
 }
 
+// "im" is handled by the regex in applyCoreCorrections.
 const COMMON_REPLACEMENTS = [
-  ['teh', 'the', 'Spelling', 'A common typo.'],
-  ['recieve', 'receive', 'Spelling', '“Receive” follows the “i before e except after c” pattern.'],
-  ['seperate', 'separate', 'Spelling', 'The correct spelling is “separate.”'],
-  ['definately', 'definitely', 'Spelling', 'The correct spelling is “definitely.”'],
-  ['occured', 'occurred', 'Spelling', '“Occurred” uses a double “r.”'],
-  ['alot', 'a lot', 'Word choice', 'Use “a lot” as two words.'],
-  ['wich', 'which', 'Spelling', 'The standard form is “which.”'],
-  ['becuase', 'because', 'Spelling', 'The correct spelling is “because.”'],
-  ['dont', "don't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['cant', "can't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['wont', "won't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['doesnt', "doesn't", 'Punctuation', 'Add the apostrophe in the contraction.'],
-  ['im', "I'm", 'Capitalization', 'Capitalize the pronoun and add the apostrophe.']
+  ['teh', 'the'],
+  ['recieve', 'receive'],
+  ['seperate', 'separate'],
+  ['definately', 'definitely'],
+  ['occured', 'occurred'],
+  ['alot', 'a lot'],
+  ['wich', 'which'],
+  ['becuase', 'because'],
+  ['dont', "don't"],
+  ['cant', "can't"],
+  ['wont', "won't"],
+  ['doesnt', "doesn't"]
 ];
 
 // ── Custom dictionary (words the user marked as correct) ──
@@ -585,38 +605,6 @@ function applyCasualRewrite(text) {
   return ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(result)));
 }
 
-function applyShortenRewrite(text) {
-  const fillers = /\b(really|very|actually|basically|just|perhaps|quite|somewhat|that)\b/gi;
-  return cleanupSpacing(
-    applyStandardRewrite(text)
-      .replace(fillers, '')
-      .replace(/\s{2,}/g, ' ')
-  );
-}
-
-function applyExpandRewrite(text) {
-  const sentences = splitSentences(applyStandardRewrite(text));
-  return sentences
-    .map((sentence, index) => {
-      if (sentence.split(' ').length < 7) {
-        const prefix = index === 0 ? 'To add a bit more context, ' : 'In practical terms, ';
-        return `${prefix}${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
-      }
-      return `${sentence} This adds a bit more clarity and context.`;
-    })
-    .join(' ');
-}
-
-function applyCreativeRewrite(text) {
-  const sentences = splitSentences(applyStandardRewrite(text));
-  return sentences
-    .map((sentence, index) => {
-      const prefix = index === 0 ? 'Think of it this way: ' : 'Another way to frame it: ';
-      return `${prefix}${sentence.charAt(0).toLowerCase()}${sentence.slice(1)}`;
-    })
-    .join(' ');
-}
-
 async function paraphraseText(text, mode = 'standard') {
   const source = text || '';
   if (!source.trim()) return '';
@@ -624,229 +612,9 @@ async function paraphraseText(text, mode = 'standard') {
   const ai = await aiProvider.run('paraphrase', source, { mode });
   if (ai != null) return ai;
 
-  switch (mode) {
-    case 'formal':
-      return applyFormalRewrite(source);
-    case 'casual':
-      return applyCasualRewrite(source);
-    case 'shorten':
-      return applyShortenRewrite(source);
-    case 'expand':
-      return applyExpandRewrite(source);
-    case 'creative':
-      return applyCreativeRewrite(source);
-    case 'standard':
-    default:
-      return applyStandardRewrite(source);
-  }
-}
-
-const SIMPLE_WORD_MAP = {
-  utilize: 'use',
-  commence: 'start',
-  terminate: 'end',
-  assistance: 'help',
-  approximately: 'about',
-  demonstrate: 'show',
-  facilitate: 'help',
-  purchase: 'buy',
-  obtain: 'get',
-  numerous: 'many',
-  regarding: 'about',
-  sufficient: 'enough',
-  additional: 'more',
-  therefore: 'so',
-  however: 'but',
-  moreover: 'and',
-  inquire: 'ask',
-  reside: 'live',
-  modification: 'change',
-  objective: 'goal',
-  requirement: 'need',
-  verify: 'check',
-  initiate: 'start',
-  prior: 'before',
-  subsequent: 'later',
-  indicate: 'show'
-};
-
-function normalizeForComparison(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function getWords(text) {
-  return normalizeWhitespace(text)
-    .match(/\b[\w']+\b/g) || [];
-}
-
-function getBigrams(text) {
-  const words = getWords(normalizeForComparison(text));
-  if (words.length < 2) return new Set(words);
-
-  const bigrams = new Set();
-  for (let i = 0; i < words.length - 1; i += 1) {
-    bigrams.add(`${words[i]} ${words[i + 1]}`);
-  }
-  return bigrams;
-}
-
-function jaccardSimilarity(setA, setB) {
-  if (!setA.size && !setB.size) return 1;
-  const intersection = [...setA].filter((item) => setB.has(item)).length;
-  const union = new Set([...setA, ...setB]).size;
-  return union ? intersection / union : 0;
-}
-
-function replaceSimpleWords(text) {
-  let result = text;
-  Object.entries(SIMPLE_WORD_MAP).forEach(([complex, simple]) => {
-    result = replaceWholeWord(result, complex, simple);
-  });
-  return result;
-}
-
-function humanizeConnectors(text) {
-  return applyPhraseReplacements(text, [
-    [/\bit is important to note that\b/gi, ''],
-    [/\bit should be noted that\b/gi, ''],
-    [/\bin order to\b/gi, 'to'],
-    [/\bdue to the fact that\b/gi, 'because'],
-    [/\bat this point in time\b/gi, 'now'],
-    [/\bas a result\b/gi, 'so'],
-    [/\bin addition\b/gi, 'and'],
-    [/\bfor the purpose of\b/gi, 'for'],
-    [/\bwith regard to\b/gi, 'about']
-  ]);
-}
-
-function depassivizeSentence(text) {
-  let result = text;
-  result = result.replace(
-    /\b(.+?)\s+was\s+([a-z]+ed)\s+by\s+(.+?)\b/i,
-    (match, subject, verb, actor) => `${titleCase(cleanupSpacing(actor))} ${verb} ${cleanupSpacing(subject).toLowerCase()}`
-  );
-  result = result.replace(
-    /\b(.+?)\s+were\s+([a-z]+ed)\s+by\s+(.+?)\b/i,
-    (match, subject, verb, actor) => `${titleCase(cleanupSpacing(actor))} ${verb} ${cleanupSpacing(subject).toLowerCase()}`
-  );
-  return result;
-}
-
-function splitLongSentence(text) {
-  const words = getWords(text);
-  if (words.length <= 20) return [cleanupSpacing(text)];
-
-  const preferredSplit = text.search(/\s(?:and|but|so)\s/i);
-  if (preferredSplit > 25 && preferredSplit < text.length - 20) {
-    const connectorMatch = text.slice(preferredSplit).match(/\s(and|but|so)\s/i);
-    if (connectorMatch) {
-      const connector = connectorMatch[1].toLowerCase();
-      const [left, right] = [
-        text.slice(0, preferredSplit),
-        text.slice(preferredSplit + connectorMatch[0].length)
-      ];
-      return [
-        ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(left))),
-        ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(`${connector} ${right}`)))
-      ];
-    }
-  }
-
-  const midpoint = Math.floor(words.length / 2);
-  const splitToken = words[midpoint];
-  const splitIndex = text.toLowerCase().indexOf(splitToken.toLowerCase(), Math.floor(text.length / 3));
-  if (splitIndex > 20) {
-    const left = text.slice(0, splitIndex);
-    const right = text.slice(splitIndex);
-    return [
-      ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(left))),
-      ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(`So ${right}`)))
-    ];
-  }
-
-  return [ensureTrailingPunctuation(sentenceCaseText(cleanupSpacing(text)))];
-}
-
-function humanizeSentence(sentence) {
-  let result = normalizeWhitespace(sentence || '');
-  if (!result) return '';
-
-  result = replaceSimpleWords(result);
-  result = humanizeConnectors(result);
-  result = depassivizeSentence(result);
-  result = applyPhraseReplacements(result, [
-    [/\bplease be advised that\b/gi, ''],
-    [/\bkindly\b/gi, 'please'],
-    [/\bdo not hesitate to\b/gi, 'please'],
-    [/\bwe would like to\b/gi, 'we want to']
-  ]);
-
-  const parts = splitLongSentence(result)
-    .map((part) => cleanupSpacing(part))
-    .filter(Boolean)
-    .map((part) => ensureTrailingPunctuation(sentenceCaseText(part)));
-
-  return cleanupSpacing(parts.join(' '));
-}
-
-function detectRepeatedSentences(sentences) {
-  const repeated = [];
-  const duplicateIndices = new Set();
-
-  for (let i = 0; i < sentences.length; i += 1) {
-    for (let j = i + 1; j < sentences.length; j += 1) {
-      const similarity = jaccardSimilarity(getBigrams(sentences[i]), getBigrams(sentences[j]));
-      if (similarity > 0.8) {
-        duplicateIndices.add(j);
-        repeated.push({
-          text: cleanupSpacing(sentences[i].replace(/[.!?]+$/, '')),
-          similarity: Number(similarity.toFixed(2)),
-          indexA: i,
-          indexB: j
-        });
-      }
-    }
-  }
-
-  return { repeated, duplicateIndices };
-}
-
-function analyzeAndHumanizeText(text) {
-  const source = String(text || '').trim();
-  const sentences = splitSentences(source).map((sentence) => cleanupSpacing(sentence)).filter(Boolean);
-
-  if (sentences.length === 0) {
-    return {
-      uniqueness_score: 1,
-      repetition_score: 0,
-      status: 'unique',
-      repeated_sentences: [],
-      humanized_text: ''
-    };
-  }
-
-  const { repeated, duplicateIndices } = detectRepeatedSentences(sentences);
-  const repeatedCount = repeated.length;
-  const repetitionScore = Number((repeatedCount / Math.max(1, sentences.length - 1)).toFixed(2));
-  const uniquenessScore = Number((1 - repetitionScore).toFixed(2));
-  const status = uniquenessScore < 0.4 ? 'rejected' : uniquenessScore <= 0.7 ? 'flagged' : 'unique';
-
-  const humanizedSentences = sentences
-    .filter((sentence, index) => !duplicateIndices.has(index))
-    .map((sentence) => humanizeSentence(sentence))
-    .filter(Boolean);
-
-  return {
-    uniqueness_score: uniquenessScore,
-    repetition_score: repetitionScore,
-    status,
-    repeated_sentences: repeated,
-    humanized_text: cleanupSpacing(humanizedSentences.join(' '))
-  };
+  if (mode === 'formal') return applyFormalRewrite(source);
+  if (mode === 'casual') return applyCasualRewrite(source);
+  return applyStandardRewrite(source);
 }
 
 function truncateSummarySentence(text, maxLength = 140) {
@@ -913,7 +681,6 @@ function scoreSummarySentence(sentence, index, titleWords) {
 
   if (index < 3) score += 4;
   if (sentence.length >= 55 && sentence.length <= 180) score += 3;
-  if (/\b(injury|availability|tactics|matchups|probable|record|confirmed|return|coach|captain|season|form)\b/i.test(sentence)) score += 3;
 
   if (titleWords?.size) {
     const overlap = [...uniqueWords].filter((word) => titleWords.has(word)).length;
@@ -984,29 +751,6 @@ async function summarizeText(content) {
   const ai = await aiProvider.run('summarize', source);
   if (ai != null) return ai;
   return buildBriefSummary(source);
-}
-
-async function getWritingScore(text) {
-  const source = text || '';
-  const words = source.match(/\b[\w']+\b/g) || [];
-  const sentences = splitSentences(source);
-  const grammarIssues = (await checkGrammar(source)).length;
-  const avgSentenceLength = sentences.length ? words.length / sentences.length : words.length;
-  const longSentencePenalty = avgSentenceLength > 24 ? 12 : avgSentenceLength > 18 ? 6 : 0;
-  const shortSentenceBonus = avgSentenceLength >= 8 && avgSentenceLength <= 18 ? 6 : 0;
-  const fillerPenalty = (source.match(/\b(very|really|actually|basically|just)\b/gi) || []).length * 2;
-
-  const grammar = Math.max(45, 100 - grammarIssues * 9);
-  const clarity = Math.max(40, 94 - longSentencePenalty - fillerPenalty + shortSentenceBonus);
-  const engagement = Math.max(45, Math.min(95, 68 + (/[!?]/.test(source) ? 4 : 0) + (/\byou\b/i.test(source) ? 6 : 0) + (/\b(imagine|build|create|improve|discover)\b/i.test(source) ? 8 : 0)));
-  const overall = Math.round((grammar * 0.4) + (clarity * 0.35) + (engagement * 0.25));
-
-  let feedback = 'Strong baseline writing.';
-  if (grammarIssues >= 3) feedback = 'Clean up grammar and spelling issues first for a stronger draft.';
-  else if (clarity < 70) feedback = 'Shorter sentences and fewer filler words would improve clarity.';
-  else if (engagement < 70) feedback = 'Stronger verbs and more direct phrasing would make this more engaging.';
-
-  return { overall, grammar, clarity, engagement, feedback };
 }
 
 // ── Tone detection ──
@@ -1196,12 +940,12 @@ function parseDateKeyword(lower) {
   const result = new Date(now);
   const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-  if (lower.includes('today')) return now.toISOString().split('T')[0];
+  if (lower.includes('today')) return now.toLocaleDateString('en-CA');
   if (lower.includes('tomorrow')) {
     result.setDate(result.getDate() + 1);
-    return result.toISOString().split('T')[0];
+    return result.toLocaleDateString('en-CA');
   }
-  if (lower.includes('tonight')) return now.toISOString().split('T')[0];
+  if (lower.includes('tonight')) return now.toLocaleDateString('en-CA');
 
   const relative = lower.match(/\bin (\d+)\s+(day|days|week|weeks|month|months)\b/);
   if (relative) {
@@ -1210,7 +954,7 @@ function parseDateKeyword(lower) {
     if (unit.startsWith('day')) result.setDate(result.getDate() + amount);
     else if (unit.startsWith('week')) result.setDate(result.getDate() + amount * 7);
     else result.setMonth(result.getMonth() + amount);
-    return result.toISOString().split('T')[0];
+    return result.toLocaleDateString('en-CA');
   }
 
   const nextWeekday = lower.match(/\b(?:next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
@@ -1220,7 +964,7 @@ function parseDateKeyword(lower) {
     let diff = (target - current + 7) % 7;
     if (diff === 0 || lower.includes(`next ${nextWeekday[1]}`)) diff += 7;
     result.setDate(result.getDate() + diff);
-    return result.toISOString().split('T')[0];
+    return result.toLocaleDateString('en-CA');
   }
 
   return null;
@@ -1689,16 +1433,21 @@ async function extendTaskReminder(taskId, minutes) {
   broadcastMessage({ action: 'tasksUpdated' });
 }
 
+// Reaches the side panel (and popup) if open; no receiver is fine.
 function broadcastMessage(message) {
-  chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }, (tabs) => {
-    if (!tabs) return;
-    tabs.forEach((tab) => {
-      if (tab.id) chrome.tabs.sendMessage(tab.id, message).catch(() => {});
-    });
-  });
+  chrome.runtime.sendMessage(message).catch(() => {});
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'openSidebar') {
+    // From a click in the page: open before any await so the user gesture still counts.
+    // The popup opens the panel itself and only uses this to queue messages.
+    if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id }).catch(() => {});
+    queueForSidebar(request.messages || []);
+    sendResponse(true);
+    return;
+  }
+
   const handler = async () => {
     try {
       switch (request.action) {
@@ -1708,12 +1457,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return correctText(request.text);
         case 'paraphrase':
           return paraphraseText(request.text, request.mode);
-        case 'analyzeHumanizeText':
-          return analyzeAndHumanizeText(request.text);
         case 'summarize':
           return summarizeText(request.content);
-        case 'writingScore':
-          return getWritingScore(request.text);
         case 'detectTone':
           return detectTone(request.text);
         case 'readability':
@@ -1781,8 +1526,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           const tasks = await getTasksFromStorage();
           const idx = tasks.findIndex((task) => task.id === request.taskId);
           if (idx !== -1) {
-            Object.assign(tasks[idx], request.updates);
-            const needsReschedule = ['title', 'kind', 'priority', 'durationMinutes', 'recurrenceMode', 'timeSlot'].some((key) => Object.prototype.hasOwnProperty.call(request.updates || {}, key));
+            // Only a real schedule change resets the reminder; editing the title keeps it.
+            const updates = request.updates || {};
+            const needsReschedule = ['kind', 'durationMinutes', 'recurrenceMode', 'timeSlot'].some((key) => key in updates && updates[key] !== tasks[idx][key]);
+            Object.assign(tasks[idx], updates);
             if (needsReschedule) {
               const schedule = buildTaskSchedule(tasks[idx], new Date());
               tasks[idx].durationMinutes = schedule.durationMinutes;
@@ -1818,6 +1565,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           return true;
         case 'getTasks':
           return getTasksFromStorage();
+        case 'takeSidebarQueue':
+          return sidebarQueue.splice(0);
         case 'rescheduleAll': {
           const tasks = await getTasksFromStorage();
           tasks.forEach((t) => { if (!t.completed) scheduleTaskReminder(t); });
